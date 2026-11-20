@@ -32,6 +32,7 @@ use tokio_rustls::TlsAcceptor;
 
 use crate::body::{body_preview, strip_hop_by_hop};
 use crate::ca::{CertAuthority, SniResolver};
+use crate::sniff;
 use crate::{EventSink, ProxyConfig};
 
 /// Magic host that serves the Relay CA certificate (open http://relay.ca on a device).
@@ -65,6 +66,29 @@ impl ProxyHandle {
         if let Some(tx) = self.shutdown.take() {
             let _ = tx.send(());
         }
+    }
+
+    /// A cloneable entry point for connections that did not come through the proxy listener
+    /// (VPN / transparent capture), sharing this proxy's CA, upstream pool and event sink.
+    pub fn transparent(&self) -> TransparentHandler {
+        TransparentHandler { shared: self.shared.clone() }
+    }
+}
+
+#[derive(Clone)]
+pub struct TransparentHandler {
+    shared: Arc<Shared>,
+}
+
+impl TransparentHandler {
+    /// Handles a connection from `src` that was headed to `dst`: TLS is intercepted (hostname from SNI),
+    /// plain HTTP is decoded, anything else is relayed to `dst` untouched.
+    pub fn handle<S>(&self, stream: S, dst: SocketAddr, src: SocketAddr)
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        let shared = self.shared.clone();
+        tokio::spawn(async move { handle_tunnel(shared, stream, dst.ip().to_string(), dst.port(), src).await });
     }
 }
 
@@ -167,25 +191,71 @@ async fn handle_proxy_request(shared: Arc<Shared>, peer: SocketAddr, req: Reques
     forward(&shared, req, "http", None, peer, false).await
 }
 
-/// Handles bytes after a successful CONNECT: decrypt TLS, or relay raw bytes.
+/// Handles a byte stream whose destination is `host:port` (after CONNECT, or from the VPN):
+/// decrypt TLS, decode plain HTTP, or relay raw bytes.
 async fn handle_tunnel<S>(shared: Arc<Shared>, mut client: S, host: String, port: u16, peer: SocketAddr)
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let mut first = vec![0u8; 4096];
-    let n = match tokio::time::timeout(Duration::from_secs(30), client.read(&mut first)).await {
-        Ok(Ok(n)) if n > 0 => n,
+    let first = match read_first_flight(&mut client).await {
+        Some(b) if !b.is_empty() => b,
         _ => return,
     };
-    first.truncate(n);
-    let looks_like_tls = first[0] == 0x16;
-    let passthrough = shared.cfg.is_passthrough(&host);
+    let sni = sniff::parse_sni(&first);
+    let is_tls = sniff::tls_record_len(&first).is_some();
+    let is_http = !is_tls && sniff::looks_like_http(&first);
+    // Through the VPN `host` is an IP address; the real name comes from SNI.
+    let name = sni.clone().unwrap_or_else(|| host.clone());
+    let passthrough = shared.cfg.is_passthrough(&name) || shared.cfg.is_passthrough(&host);
     let client = Prefixed::new(Bytes::from(first), client);
 
-    if looks_like_tls && !passthrough {
-        intercept_tls(shared, client, host, port, peer).await;
+    if is_tls && !passthrough {
+        intercept_tls(shared, client, name, port, peer).await;
+    } else if is_http && !passthrough {
+        serve_plain_http(shared, client, host, port, peer).await;
     } else {
-        raw_tunnel(shared, client, host, port, peer, passthrough).await;
+        raw_tunnel(shared, client, name, host, port, peer, passthrough).await;
+    }
+}
+
+/// Reads the client's first bytes; for TLS, keeps reading until the whole ClientHello record is in.
+async fn read_first_flight<S: AsyncRead + Unpin>(client: &mut S) -> Option<Vec<u8>> {
+    let mut buf = Vec::with_capacity(4096);
+    let mut chunk = [0u8; 4096];
+    let deadline = Duration::from_secs(30);
+    loop {
+        let n = match tokio::time::timeout(deadline, client.read(&mut chunk)).await {
+            Ok(Ok(n)) => n,
+            _ => return if buf.is_empty() { None } else { Some(buf) },
+        };
+        if n == 0 {
+            return Some(buf);
+        }
+        buf.extend_from_slice(&chunk[..n]);
+        match sniff::tls_record_len(&buf) {
+            Some(need) if buf.len() < need && buf.len() < 16 * 1024 + 5 => continue,
+            _ => return Some(buf),
+        }
+    }
+}
+
+/// Plain HTTP on a transparent connection: decode it like an absolute-form proxy request.
+async fn serve_plain_http<S>(shared: Arc<Shared>, client: S, host: String, port: u16, peer: SocketAddr)
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let fallback = if port == 80 { host.clone() } else { format!("{host}:{port}") };
+    let svc = service_fn(move |req: Request<Incoming>| {
+        let shared = shared.clone();
+        let fallback = fallback.clone();
+        async move {
+            // Prefer the Host header (real name); fall back to the destination IP.
+            let authority = host_header(req.headers()).unwrap_or(fallback);
+            Ok::<_, Infallible>(forward(&shared, req, "http", Some(authority), peer, false).await)
+        }
+    });
+    if let Err(e) = http1::Builder::new().preserve_header_case(true).serve_connection(TokioIo::new(client), svc).await {
+        tracing::debug!(%host, error = %e, "plain HTTP connection ended with error");
     }
 }
 
@@ -236,13 +306,23 @@ where
     }
 }
 
-async fn raw_tunnel<S>(shared: Arc<Shared>, mut client: S, host: String, port: u16, peer: SocketAddr, passthrough: bool)
-where
+/// Relays bytes untouched. `name` is what we show (SNI when known); `target` is where we connect.
+async fn raw_tunnel<S>(
+    shared: Arc<Shared>,
+    mut client: S,
+    name: String,
+    target: String,
+    port: u16,
+    peer: SocketAddr,
+    passthrough: bool,
+) where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     let started = Instant::now();
     let started_ms = now_ms();
-    let mut t = base_transaction(&shared, "CONNECT", "https", &host, port, "", peer, started_ms);
+    let scheme = if port == 80 { "http" } else { "https" };
+    let mut t = base_transaction(&shared, "CONNECT", scheme, &name, port, "", peer, started_ms);
+    let host = target;
     match TcpStream::connect((host.as_str(), port)).await {
         Ok(mut upstream) => {
             let _ = upstream.set_nodelay(true);

@@ -184,3 +184,65 @@ async fn forwards_plain_http_and_serves_ca_download() {
     assert!(String::from_utf8_lossy(&ca.body).starts_with("-----BEGIN CERTIFICATE-----"));
     let _: SocketAddr = proxy.local_addr;
 }
+
+/// Simulates VPN capture: the app's connection arrives as a raw stream aimed at an IP address,
+/// with no CONNECT. The hostname must come from SNI.
+#[tokio::test]
+async fn transparent_tls_is_decrypted_using_sni() {
+    use http_body_util::{BodyExt, Empty};
+    let (origin_port, origin_ca) = start_https_origin().await;
+    let (proxy, log, relay_ca) = start_proxy(origin_ca, &[]).await;
+    let handler = proxy.transparent();
+
+    let (app_side, engine_side) = tokio::io::duplex(64 * 1024);
+    let dst: SocketAddr = format!("127.0.0.1:{origin_port}").parse().unwrap();
+    handler.handle(engine_side, dst, "10.111.0.2:40000".parse().unwrap());
+
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add(relay_ca).unwrap();
+    let cfg = rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    let tls = tokio_rustls::TlsConnector::from(Arc::new(cfg))
+        .connect(rustls::pki_types::ServerName::try_from("localhost").unwrap(), app_side)
+        .await
+        .expect("app trusts Relay CA");
+    let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(tls)).await.unwrap();
+    tokio::spawn(conn);
+    let req = Request::get("/v2/recommendations")
+        .header("host", format!("localhost:{origin_port}"))
+        .body(Empty::<Bytes>::new())
+        .unwrap();
+    let resp = sender.send_request(req).await.unwrap();
+    assert_eq!(resp.status(), 200);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    assert!(String::from_utf8_lossy(&body).contains("/v2/recommendations"));
+
+    let t = wait_for(&log, 1).await.remove(0);
+    assert!(t.decrypted);
+    assert_eq!((t.host.as_str(), t.path.as_str(), t.client_addr.as_str()), ("localhost", "/v2/recommendations", "10.111.0.2:40000"));
+}
+
+#[tokio::test]
+async fn transparent_plain_http_uses_host_header() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let http_port = start_http_origin().await;
+    let (_p, origin_ca) = start_https_origin().await;
+    let (proxy, log, _ca) = start_proxy(origin_ca, &[]).await;
+
+    let (mut app_side, engine_side) = tokio::io::duplex(64 * 1024);
+    let dst: SocketAddr = format!("127.0.0.1:{http_port}").parse().unwrap();
+    proxy.transparent().handle(engine_side, dst, "10.111.0.2:40001".parse().unwrap());
+    app_side
+        .write_all(format!("GET /health?x=1 HTTP/1.1\r\nHost: 127.0.0.1:{http_port}\r\nConnection: close\r\n\r\n").as_bytes())
+        .await
+        .unwrap();
+    let mut out = String::new();
+    app_side.read_to_string(&mut out).await.unwrap();
+    assert!(out.starts_with("HTTP/1.1 200"), "{out}");
+
+    let t = wait_for(&log, 1).await.remove(0);
+    assert_eq!((t.scheme.as_str(), t.path.as_str(), t.state), ("http", "/health?x=1", TransactionState::Complete));
+}

@@ -57,6 +57,38 @@ pub async fn fetch_via_proxy(proxy: SocketAddr, url: &str, roots: &[CertificateD
     }
 }
 
+/// GETs `url` directly (no proxy). HTTPS is verified against `roots`, or the public web PKI if `None`.
+/// Used to test VPN capture: the VPN, not a proxy setting, is what routes this through Relay.
+pub async fn fetch_direct(url: &str, roots: Option<&[CertificateDer<'static>]>) -> Result<FetchResult> {
+    let uri: Uri = url.parse().context("parsing URL")?;
+    let host = uri.host().context("URL needs a host")?.to_owned();
+    let https = uri.scheme_str() == Some("https");
+    let port = uri.port_u16().unwrap_or(if https { 443 } else { 80 });
+    let stream = TcpStream::connect((host.as_str(), port)).await.context("connecting")?;
+    let path = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/").to_owned();
+    if !https {
+        return send(stream, &host, port, &path).await;
+    }
+    let mut store = RootCertStore::empty();
+    match roots {
+        Some(r) => {
+            for c in r {
+                store.add(c.clone())?;
+            }
+        }
+        None => store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned()),
+    }
+    let cfg = ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+        .with_safe_default_protocol_versions()?
+        .with_root_certificates(store)
+        .with_no_client_auth();
+    let tls = TlsConnector::from(Arc::new(cfg))
+        .connect(ServerName::try_from(host.clone())?, stream)
+        .await
+        .context("TLS handshake")?;
+    send(tls, &host, port, &path).await
+}
+
 async fn send<S>(io: S, host: &str, port: u16, target: &str) -> Result<FetchResult>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,

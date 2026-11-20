@@ -16,6 +16,7 @@ path = "src/bin/uniffi-bindgen.rs"
 [dependencies]
 anyhow = "1.0.104"
 relay-model = { version = "0.1.0", path = "../relay-model" }
+relay-netstack = { version = "0.1.0", path = "../relay-netstack" }
 relay-proxy = { version = "0.1.0", path = "../relay-proxy" }
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std"] }
 thiserror = "2.0.21"

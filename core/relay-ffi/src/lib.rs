@@ -11,13 +11,13 @@ uniffi::setup_scaffolding!();
 
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum RelayError {
-    #[error("{message}")]
-    Failed { message: String },
+    #[error("{reason}")]
+    Failed { reason: String },
 }
 
 impl From<anyhow::Error> for RelayError {
     fn from(e: anyhow::Error) -> Self {
-        RelayError::Failed { message: format!("{e:#}") }
+        RelayError::Failed { reason: format!("{e:#}") }
     }
 }
 
@@ -102,11 +102,19 @@ impl EventSink for ListenerSink {
     }
 }
 
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct VpnStats {
+    pub tcp_connections: u64,
+    pub udp_flows: u64,
+    pub quic_blocked: u64,
+}
+
 #[derive(uniffi::Object)]
 pub struct RelayEngine {
     runtime: tokio::runtime::Runtime,
     data_dir: PathBuf,
     handle: Mutex<Option<ProxyHandle>>,
+    vpn: Mutex<Option<relay_netstack::VpnCapture>>,
 }
 
 #[uniffi::export]
@@ -119,8 +127,39 @@ impl RelayEngine {
             .thread_name("relay-engine")
             .enable_all()
             .build()
-            .map_err(|e| RelayError::Failed { message: e.to_string() })?;
-        Ok(Arc::new(Self { runtime, data_dir: data_dir.into(), handle: Mutex::new(None) }))
+            .map_err(|e| RelayError::Failed { reason: e.to_string() })?;
+        Ok(Arc::new(Self { runtime, data_dir: data_dir.into(), handle: Mutex::new(None), vpn: Mutex::new(None) }))
+    }
+
+    /// Starts capturing from a VPN/TUN file descriptor (Android `VpnService`). Takes ownership of
+    /// `tun_fd` (pass `ParcelFileDescriptor.detachFd()`). Call `start` first.
+    pub fn start_vpn(&self, tun_fd: i32, mtu: u16, block_quic: bool) -> Result<(), RelayError> {
+        let handler = match self.handle.lock().unwrap().as_ref() {
+            Some(h) => h.transparent(),
+            None => return Err(RelayError::Failed { reason: "start the engine before the VPN".into() }),
+        };
+        let _rt = self.runtime.enter();
+        // SAFETY: the caller hands us exclusive ownership of an open TUN descriptor.
+        let dev = unsafe { relay_netstack::TunFd::from_raw(tun_fd) }
+            .map_err(|e| RelayError::Failed { reason: format!("TUN fd: {e}") })?;
+        let capture = relay_netstack::start(dev, relay_netstack::NetstackOptions { mtu, block_quic, ..Default::default() }, handler)?;
+        *self.vpn.lock().unwrap() = Some(capture);
+        Ok(())
+    }
+
+    pub fn stop_vpn(&self) {
+        if let Some(v) = self.vpn.lock().unwrap().take() {
+            v.stop();
+        }
+    }
+
+    pub fn vpn_stats(&self) -> Option<VpnStats> {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.vpn.lock().unwrap().as_ref().map(|v| VpnStats {
+            tcp_connections: v.stats.tcp_connections.load(Relaxed),
+            udp_flows: v.stats.udp_flows.load(Relaxed),
+            quic_blocked: v.stats.quic_blocked.load(Relaxed),
+        })
     }
 
     /// Starts the proxy on `listen_ip:port` (port 0 = any free port). Returns the bound port.
@@ -131,7 +170,7 @@ impl RelayEngine {
         }
         let addr = format!("{listen_ip}:{port}")
             .parse()
-            .map_err(|e| RelayError::Failed { message: format!("bad listen address: {e}") })?;
+            .map_err(|e| RelayError::Failed { reason: format!("bad listen address: {e}") })?;
         let cfg = ProxyConfig::new(addr, &self.data_dir);
         let handle = self.runtime.block_on(relay_proxy::start(cfg, Arc::new(ListenerSink(listener))))?;
         let port = handle.local_addr.port();

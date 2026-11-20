@@ -67,6 +67,7 @@ async fn main() -> Result<()> {
     match args.cmd.as_str() {
         "serve" => serve(&args, data_dir).await,
         "fetch" => fetch(&args, data_dir).await,
+        "get" => get(&args).await,
         "ca" => {
             let provider = Arc::new(rustls::crypto::ring::default_provider());
             let ca = relay_proxy::ca::CertAuthority::load_or_create(&data_dir, provider)?;
@@ -74,7 +75,7 @@ async fn main() -> Result<()> {
             Ok(())
         }
         _ => {
-            eprintln!("usage:\n  relay serve [--port 8888] [--listen 127.0.0.1] [--data-dir DIR] [--json]\n  relay fetch <url> [--proxy 127.0.0.1:8888]\n  relay ca");
+            eprintln!("usage:\n  relay get <url> [--ca FILE]\n  relay serve [--port 8888] [--listen 127.0.0.1] [--data-dir DIR] [--json]\n  relay fetch <url> [--proxy 127.0.0.1:8888]\n  relay ca");
             Ok(())
         }
     }
@@ -113,6 +114,30 @@ async fn fetch(args: &Args, data_dir: PathBuf) -> Result<()> {
     for (k, v) in r.headers.iter().take(8) {
         println!("  {k}: {v}");
     }
+    Ok(())
+}
+
+/// Direct GET (no proxy). `--ca FILE` trusts only that CA (proves interception); default trusts the public web PKI.
+async fn get(args: &Args) -> Result<()> {
+    let Some(url) = args.positional.first() else { bail!("usage: relay get <url> [--ca relay-ca.pem]") };
+    let ca = match args.opts.get("ca") {
+        Some(path) => {
+            use rustls::pki_types::pem::PemObject;
+            Some(vec![CertificateDer::from_pem_slice(std::fs::read_to_string(path)?.as_bytes())?])
+        }
+        None => None,
+    };
+    let started = std::time::Instant::now();
+    let r = relay_proxy::client::fetch_direct(url, ca.as_deref()).await?;
+    let secs = started.elapsed().as_secs_f64();
+    let trust = if ca.is_some() { "Relay CA only" } else { "public web PKI" };
+    println!(
+        "HTTP {} — {} bytes in {:.2}s ({:.1} Mbit/s) — TLS trust: {trust}",
+        r.status,
+        r.body.len(),
+        secs,
+        r.body.len() as f64 * 8.0 / secs / 1e6
+    );
     Ok(())
 }
 

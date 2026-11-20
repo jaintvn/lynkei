@@ -5,13 +5,14 @@
 pub mod body;
 pub mod ca;
 pub mod client;
+pub mod sniff;
 mod proxy;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
-pub use proxy::{CA_DOWNLOAD_HOST, ProxyHandle, start};
+pub use proxy::{CA_DOWNLOAD_HOST, ProxyHandle, TransparentHandler, start};
 pub use relay_model::{Header, Transaction, TransactionState};
 pub use rustls::pki_types::CertificateDer;
 

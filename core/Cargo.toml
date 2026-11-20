@@ -1,0 +1,13 @@
+[workspace]
+resolver = "3"
+members = ["relay-model", "relay-proxy", "relay-ffi", "relay-cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

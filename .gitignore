@@ -1,0 +1,21 @@
+# Reference installer (proprietary, large) — never commit
+*.dmg
+
+# Rust
+core/target/
+
+# Swift / Xcode
+apple/**/.build/
+apple/**/build/
+apple/RelayKit/RelayFFI.xcframework/
+*.xcuserstate
+xcuserdata/
+DerivedData/
+
+# Generated bindings (rebuild with scripts/build-apple.sh)
+apple/RelayKit/Sources/RelayKit/Generated/
+
+# Rejected Stitch exploration (kept locally for reference only)
+design/stitch/
+
+.DS_Store

@@ -39,6 +39,10 @@ pub struct ProxyConfig {
     pub passthrough_hosts: Vec<String>,
     pub max_preview_bytes: usize,
     pub upstream_timeout: Duration,
+    /// After one side of a tunnel finishes, how long the other side may keep going before both are
+    /// closed. Some servers (Apple's) only close at their idle timeout, which would leave the
+    /// tunnel "open" long after the app left.
+    pub tunnel_half_close_grace: Duration,
     /// Extra trusted roots for upstream servers (tests, corporate CAs).
     pub extra_upstream_roots: Vec<CertificateDer<'static>>,
 }
@@ -51,6 +55,7 @@ impl ProxyConfig {
             passthrough_hosts: default_passthrough(),
             max_preview_bytes: 256 * 1024,
             upstream_timeout: Duration::from_secs(60),
+            tunnel_half_close_grace: Duration::from_secs(5),
             extra_upstream_roots: vec![],
         }
     }

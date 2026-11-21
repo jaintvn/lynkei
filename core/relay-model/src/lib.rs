@@ -39,6 +39,12 @@ pub struct Transaction {
     pub error: Option<String>,
     /// True when HTTPS traffic was decrypted by Relay.
     pub decrypted: bool,
+    /// Protocol between the app and Relay, e.g. "HTTP/2".
+    #[serde(default = "default_version")]
+    pub http_version: String,
+    /// Protocol between Relay and the server, once a response arrived.
+    #[serde(default)]
+    pub upstream_http_version: Option<String>,
     pub request_headers: Vec<Header>,
     pub response_headers: Vec<Header>,
     pub request_body_size: u64,
@@ -47,6 +53,10 @@ pub struct Transaction {
     pub request_body_preview: Option<String>,
     pub response_body_preview: Option<String>,
     pub client_addr: String,
+}
+
+fn default_version() -> String {
+    "HTTP/1.1".to_owned()
 }
 
 impl Transaction {
@@ -85,6 +95,8 @@ mod tests {
             state: TransactionState::Complete,
             error: None,
             decrypted: true,
+            http_version: "HTTP/2".into(),
+            upstream_http_version: Some("HTTP/2".into()),
             request_headers: vec![],
             response_headers: vec![Header { name: "Content-Type".into(), value: "application/json".into() }],
             request_body_size: 0,

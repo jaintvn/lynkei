@@ -35,24 +35,56 @@ fn origin_pki() -> (CertificateDer<'static>, Vec<CertificateDer<'static>>, Priva
     (ca_cert.der().clone(), vec![leaf.der().clone(), ca_cert.der().clone()], key)
 }
 
-async fn origin_handler(req: Request<hyper::body::Incoming>) -> Result<Response<Full<Bytes>>, Infallible> {
-    let body = format!(r#"{{"path":"{}","items":[1,2,3]}}"#, req.uri());
+type OriginBody = http_body_util::combinators::BoxBody<Bytes, Infallible>;
+
+/// Echoes the path and the HTTP version the origin saw. `/grpc` answers like a gRPC server:
+/// a body followed by `grpc-status` trailers.
+async fn origin_handler(req: Request<hyper::body::Incoming>) -> Result<Response<OriginBody>, Infallible> {
+    use http_body_util::BodyExt;
+    let version = if req.version() == http::Version::HTTP_2 { "HTTP/2" } else { "HTTP/1.1" };
+    // Be as strict as Google's front end: HTTP/2 requests must carry the host only in :authority.
+    if req.version() == http::Version::HTTP_2 && req.headers().contains_key("host") {
+        return Ok(Response::builder().status(400).body(Full::new(Bytes::from_static(b"host header on h2")).boxed()).unwrap());
+    }
+    if req.uri().path() == "/grpc" {
+        let te_ok = req.headers().get("te").is_some_and(|v| v == "trailers");
+        let mut trailers = http::HeaderMap::new();
+        trailers.insert("grpc-status", if te_ok { "0".parse().unwrap() } else { "13".parse().unwrap() });
+        trailers.insert("grpc-message", "ok".parse().unwrap());
+        let body = Full::new(Bytes::from_static(b"\x00\x00\x00\x00\x02hi")).with_trailers(async move { Some(Ok(trailers)) });
+        return Ok(Response::builder()
+            .header("content-type", "application/grpc")
+            .body(body.boxed())
+            .unwrap());
+    }
+    let body = format!(r#"{{"path":"{}","items":[1,2,3],"version":"{}"}}"#, req.uri(), version);
     Ok(Response::builder()
         .header("content-type", "application/json")
         .header("x-origin", "test")
-        .body(Full::new(Bytes::from(body)))
+        .body(Full::new(Bytes::from(body)).boxed())
         .unwrap())
 }
 
-/// Starts an HTTPS origin on localhost; returns (port, origin CA).
+/// Serves HTTP/1.1 or HTTP/2 (ALPN on TLS, prior knowledge on plain TCP).
+async fn serve_origin<IO>(io: IO)
+where
+    IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let _ = hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new())
+        .serve_connection(TokioIo::new(io), service_fn(origin_handler))
+        .await;
+}
+
+/// Starts an HTTPS origin on localhost (h2 + http/1.1); returns (port, origin CA).
 async fn start_https_origin() -> (u16, CertificateDer<'static>) {
     let (ca, chain, key) = origin_pki();
-    let cfg = ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+    let mut cfg = ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
         .with_safe_default_protocol_versions()
         .unwrap()
         .with_no_client_auth()
         .with_single_cert(chain, key)
         .unwrap();
+    cfg.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
     let acceptor = TlsAcceptor::from(Arc::new(cfg));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -62,9 +94,7 @@ async fn start_https_origin() -> (u16, CertificateDer<'static>) {
             let acceptor = acceptor.clone();
             tokio::spawn(async move {
                 if let Ok(tls) = acceptor.accept(s).await {
-                    let _ = hyper::server::conn::http1::Builder::new()
-                        .serve_connection(TokioIo::new(tls), service_fn(origin_handler))
-                        .await;
+                    serve_origin(tls).await;
                 }
             });
         }
@@ -78,11 +108,7 @@ async fn start_http_origin() -> u16 {
     tokio::spawn(async move {
         loop {
             let (s, _) = listener.accept().await.unwrap();
-            tokio::spawn(async move {
-                let _ = hyper::server::conn::http1::Builder::new()
-                    .serve_connection(TokioIo::new(s), service_fn(origin_handler))
-                    .await;
-            });
+            tokio::spawn(serve_origin(s));
         }
     });
     port
@@ -149,6 +175,8 @@ async fn decrypts_https_when_client_trusts_relay_ca() {
     assert_eq!(t.status, Some(200));
     assert_eq!(t.response_header("x-origin"), Some("test"));
     assert!(t.response_body_preview.as_deref().unwrap().contains("items"));
+    assert_eq!((t.http_version.as_str(), t.upstream_http_version.as_deref()), ("HTTP/1.1", Some("HTTP/2")));
+    assert!(String::from_utf8_lossy(&res.body).contains(r#""version":"HTTP/2""#), "origin was reached over h2");
 }
 
 #[tokio::test]
@@ -418,4 +446,194 @@ async fn client_hanging_up_mid_stream_is_recorded() {
     assert_eq!(t.state, TransactionState::Failed);
     assert!(t.error.as_deref().unwrap().contains("interrupted"), "{:?}", t.error);
     assert!(t.response_body_size >= 11);
+}
+
+
+// ---------- HTTP/2 ----------
+
+/// CONNECT through the proxy, then TLS with the given ALPN list, trusting only `relay_ca`.
+async fn tls_through_proxy(
+    proxy: SocketAddr,
+    port: u16,
+    relay_ca: CertificateDer<'static>,
+    alpn: &[&[u8]],
+) -> tokio_rustls::client::TlsStream<tokio::net::TcpStream> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut s = tokio::net::TcpStream::connect(proxy).await.unwrap();
+    s.write_all(format!("CONNECT localhost:{port} HTTP/1.1\r\nHost: localhost:{port}\r\n\r\n").as_bytes()).await.unwrap();
+    let mut head = Vec::new();
+    while !head.ends_with(b"\r\n\r\n") {
+        let mut b = [0u8; 1];
+        s.read_exact(&mut b).await.unwrap();
+        head.push(b[0]);
+    }
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add(relay_ca).unwrap();
+    let mut cfg = rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    cfg.alpn_protocols = alpn.iter().map(|p| p.to_vec()).collect();
+    tokio_rustls::TlsConnector::from(Arc::new(cfg))
+        .connect(rustls::pki_types::ServerName::try_from("localhost").unwrap(), s)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn http2_app_to_http2_origin_is_decrypted() {
+    use http_body_util::{BodyExt, Empty};
+    let (port, origin_ca) = start_https_origin().await;
+    let (proxy, log, relay_ca) = start_proxy(origin_ca, &[]).await;
+    let tls = tls_through_proxy(proxy.local_addr, port, relay_ca, &[b"h2", b"http/1.1"]).await;
+    assert_eq!(tls.get_ref().1.alpn_protocol(), Some(&b"h2"[..]), "Relay offers h2 to the app");
+
+    let (mut sender, conn) =
+        hyper::client::conn::http2::handshake(hyper_util::rt::TokioExecutor::new(), TokioIo::new(tls)).await.unwrap();
+    tokio::spawn(conn);
+    let req = Request::get(format!("https://localhost:{port}/v2/products?page=2")).body(Empty::<Bytes>::new()).unwrap();
+    let resp = sender.send_request(req).await.unwrap();
+    assert_eq!((resp.status().as_u16(), resp.version()), (200, http::Version::HTTP_2));
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    assert!(String::from_utf8_lossy(&body).contains(r#""version":"HTTP/2""#));
+
+    let t = wait_for(&log, 1).await.remove(0);
+    assert!(t.decrypted);
+    assert_eq!(t.path, "/v2/products?page=2");
+    assert_eq!((t.http_version.as_str(), t.upstream_http_version.as_deref()), ("HTTP/2", Some("HTTP/2")));
+}
+
+#[tokio::test]
+async fn grpc_trailers_survive_the_proxy() {
+    use http_body_util::{BodyExt, Empty};
+    let (port, origin_ca) = start_https_origin().await;
+    let (proxy, log, relay_ca) = start_proxy(origin_ca, &[]).await;
+    let tls = tls_through_proxy(proxy.local_addr, port, relay_ca, &[b"h2"]).await;
+    let (mut sender, conn) =
+        hyper::client::conn::http2::handshake(hyper_util::rt::TokioExecutor::new(), TokioIo::new(tls)).await.unwrap();
+    tokio::spawn(conn);
+    let req = Request::post(format!("https://localhost:{port}/grpc"))
+        .header("content-type", "application/grpc")
+        .header("te", "trailers")
+        .body(Empty::<Bytes>::new())
+        .unwrap();
+    let collected = sender.send_request(req).await.unwrap().into_body().collect().await.unwrap();
+    let trailers = collected.trailers().cloned().expect("trailers reach the app");
+    assert_eq!(trailers.get("grpc-status").unwrap(), "0", "te: trailers reached the server and trailers came back");
+    let t = wait_for(&log, 1).await.remove(0);
+    assert_eq!((t.state, t.status), (TransactionState::Complete, Some(200)));
+}
+
+/// gRPC in development often runs h2c (HTTP/2 without TLS). Through the VPN it must stay h2c.
+#[tokio::test]
+async fn transparent_h2c_prior_knowledge() {
+    use http_body_util::{BodyExt, Empty};
+    let http_port = start_http_origin().await;
+    let (_p, origin_ca) = start_https_origin().await;
+    let (proxy, log, _ca) = start_proxy(origin_ca, &[]).await;
+
+    let (app_side, engine_side) = tokio::io::duplex(256 * 1024);
+    let dst: SocketAddr = format!("127.0.0.1:{http_port}").parse().unwrap();
+    proxy.transparent().handle(engine_side, dst, "10.111.0.2:40100".parse().unwrap());
+    let (mut sender, conn) =
+        hyper::client::conn::http2::handshake(hyper_util::rt::TokioExecutor::new(), TokioIo::new(app_side)).await.unwrap();
+    tokio::spawn(conn);
+    let req = Request::get(format!("http://127.0.0.1:{http_port}/h2c-check")).body(Empty::<Bytes>::new()).unwrap();
+    let resp = sender.send_request(req).await.unwrap();
+    assert_eq!(resp.version(), http::Version::HTTP_2);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    assert!(String::from_utf8_lossy(&body).contains(r#""version":"HTTP/2""#), "origin saw h2c");
+
+    let finals = wait_for(&log, 1).await;
+    if finals.is_empty() {
+        for t in log.lock().unwrap().iter() {
+            eprintln!("DEBUG {:?} {} {} {:?} up={:?} err={:?}", t.state, t.method, t.path, t.status, t.upstream_http_version, t.error);
+        }
+    }
+    let t = finals.into_iter().next().expect("final event");
+    assert_eq!((t.scheme.as_str(), t.http_version.as_str(), t.upstream_http_version.as_deref()), ("http", "HTTP/2", Some("HTTP/2")));
+}
+
+/// A non-HTTP, non-TLS server that answers 1000 bytes and then resets the connection (RST), like
+/// many real servers and apps do. Tunnel byte counts must survive the abrupt close.
+#[tokio::test]
+async fn tunnel_byte_counts_survive_an_abrupt_close() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        let (mut s, _) = listener.accept().await.unwrap();
+        let mut hello = [0u8; 5];
+        s.read_exact(&mut hello).await.unwrap();
+        s.write_all(&[7u8; 1000]).await.unwrap();
+        s.set_zero_linger().unwrap(); // close with RST instead of FIN
+        drop(s);
+    });
+    let (_p, origin_ca) = start_https_origin().await;
+    let (proxy, log, _ca) = start_proxy(origin_ca, &[]).await;
+
+    let mut c = tokio::net::TcpStream::connect(proxy.local_addr).await.unwrap();
+    c.write_all(format!("CONNECT 127.0.0.1:{port} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n").as_bytes()).await.unwrap();
+    let mut head = Vec::new();
+    while !head.ends_with(b"\r\n\r\n") {
+        let mut b = [0u8; 1];
+        c.read_exact(&mut b).await.unwrap();
+        head.push(b[0]);
+    }
+    c.write_all(b"hello").await.unwrap();
+    let mut got = vec![0u8; 1000];
+    c.read_exact(&mut got).await.unwrap();
+    drop(c); // the app closes its side too
+
+    let t = wait_for(&log, 1).await.remove(0);
+    assert_eq!(t.state, TransactionState::Tunneled);
+    assert_eq!((t.request_body_size, t.response_body_size), (5, 1000), "bytes counted despite the reset");
+}
+
+/// The app leaves, but the server never closes its side (Apple's servers wait for their 60 s idle
+/// timeout). The tunnel must finish after the half-close grace period, not when the server times out.
+#[tokio::test]
+async fn tunnel_closes_after_grace_when_server_lingers() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        let (mut s, _) = listener.accept().await.unwrap();
+        let mut hello = [0u8; 5];
+        s.read_exact(&mut hello).await.unwrap();
+        s.write_all(b"world").await.unwrap();
+        tokio::time::sleep(Duration::from_secs(30)).await; // never closes in time
+    });
+    let (_p, origin_ca) = start_https_origin().await;
+    let dir = std::env::temp_dir().join(format!("relay-e2e-grace-{}", rand_suffix()));
+    let mut cfg = ProxyConfig::new("127.0.0.1:0".parse().unwrap(), &dir);
+    cfg.extra_upstream_roots = vec![origin_ca];
+    cfg.tunnel_half_close_grace = Duration::from_millis(300);
+    let log: Log = Arc::default();
+    let sink_log = log.clone();
+    let proxy = relay_proxy::start(cfg, Arc::new(move |t: Transaction| {
+        let mut l = sink_log.lock().unwrap();
+        match l.iter_mut().find(|e| e.id == t.id) { Some(e) => *e = t, None => l.push(t) }
+    }))
+    .await
+    .unwrap();
+
+    let mut c = tokio::net::TcpStream::connect(proxy.local_addr).await.unwrap();
+    c.write_all(format!("CONNECT 127.0.0.1:{port} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n").as_bytes()).await.unwrap();
+    let mut head = Vec::new();
+    while !head.ends_with(b"\r\n\r\n") {
+        let mut b = [0u8; 1];
+        c.read_exact(&mut b).await.unwrap();
+        head.push(b[0]);
+    }
+    c.write_all(b"hello").await.unwrap();
+    let mut got = [0u8; 5];
+    c.read_exact(&mut got).await.unwrap();
+    let left_at = std::time::Instant::now();
+    drop(c); // the app is done
+
+    let t = wait_for(&log, 1).await.remove(0);
+    assert_eq!((t.state, t.request_body_size, t.response_body_size), (TransactionState::Tunneled, 5, 5));
+    assert!(left_at.elapsed() < Duration::from_secs(2), "closed after the grace period, took {:?}", left_at.elapsed());
 }

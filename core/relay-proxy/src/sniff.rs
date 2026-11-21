@@ -56,8 +56,14 @@ pub fn parse_sni(buf: &[u8]) -> Option<String> {
     None
 }
 
-/// True if `buf` starts with an HTTP/1.x request line method.
+/// The client connection preface of HTTP/2 with prior knowledge (h2c), RFC 9113 §3.4.
+pub const H2_PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+
+/// True if `buf` starts with an HTTP/1.x request line or the HTTP/2 (h2c) connection preface.
 pub fn looks_like_http(buf: &[u8]) -> bool {
+    if buf.starts_with(&H2_PREFACE[..buf.len().min(H2_PREFACE.len())]) && buf.len() >= 4 {
+        return true;
+    }
     const METHODS: &[&[u8]] = &[
         b"GET ", b"POST ", b"PUT ", b"HEAD ", b"DELETE ", b"PATCH ", b"OPTIONS ", b"TRACE ",
     ];
@@ -130,5 +136,8 @@ mod tests {
         assert!(looks_like_http(b"POST /graphql HTTP/1.1\r\n"));
         assert!(!looks_like_http(b"\x16\x03\x01\x02\x00"));
         assert!(!looks_like_http(b"SSH-2.0-OpenSSH"));
+        assert!(looks_like_http(H2_PREFACE), "h2c prior knowledge");
+        assert!(looks_like_http(b"PRI * HTTP/2.0\r\n"), "partial preface in the first read");
+        assert!(!looks_like_http(b"PRI"), "too short to tell");
     }
 }

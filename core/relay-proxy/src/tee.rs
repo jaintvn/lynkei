@@ -38,13 +38,22 @@ pub struct TeeBody<B> {
     buf: BytesMut,
     limit: usize,
     total: u64,
+    /// Declared length (Content-Length). Reaching it means complete, even if the inner body never
+    /// reports its end (e.g. HTTP/1.1 client leg stops polling an HTTP/2 upstream body at the length).
+    expected: Option<u64>,
     done: Option<oneshot::Sender<TeeOutcome>>,
 }
 
 impl<B> TeeBody<B> {
     pub fn new(inner: B, limit: usize) -> (Self, oneshot::Receiver<TeeOutcome>) {
         let (tx, rx) = oneshot::channel();
-        (Self { inner, buf: BytesMut::new(), limit, total: 0, done: Some(tx) }, rx)
+        (Self { inner, buf: BytesMut::new(), limit, total: 0, expected: None, done: Some(tx) }, rx)
+    }
+
+    /// Declares the body length (from `Content-Length`), so reaching it counts as complete.
+    pub fn with_expected_len(mut self, len: Option<u64>) -> Self {
+        self.expected = len;
+        self
     }
 
     fn finish(&mut self, error: Option<String>) {
@@ -81,7 +90,7 @@ where
                 }
                 // hyper stops polling once a length-delimited body reports its end, so the final
                 // `None` may never come: finish here instead.
-                if self.inner.is_end_stream() {
+                if self.inner.is_end_stream() || self.expected == Some(self.total) {
                     self.finish(None);
                 }
                 Poll::Ready(Some(Ok(frame)))
@@ -114,7 +123,8 @@ impl<B> Drop for TeeBody<B> {
         if self.done.is_some() {
             // Completed bodies were already finished in `poll_frame`; an empty body that was never
             // polled is not an error.
-            let msg = (self.total > 0).then(|| "stream closed before the end of the body".to_string());
+            let complete = self.total == 0 || self.expected == Some(self.total);
+            let msg = (!complete).then(|| "stream closed before the end of the body".to_string());
             self.finish(msg);
         }
     }
@@ -149,6 +159,19 @@ mod tests {
         assert_eq!(&out[..], b"hello streaming world", "client receives every byte");
         let o = rx.await.unwrap();
         assert_eq!((&o.captured[..], o.total, o.truncated, o.error), (&b"hello st"[..], 21, true, None));
+    }
+
+    #[tokio::test]
+    async fn reaching_content_length_counts_as_complete() {
+        // Two chunks, declared length 16; the consumer stops after the bytes, never polling the end.
+        let (tee, rx) = TeeBody::new(chunks(vec![b"part one", b"part two"]), 1024);
+        let mut tee = tee.with_expected_len(Some(16));
+        for _ in 0..2 {
+            std::future::poll_fn(|cx| Pin::new(&mut tee).poll_frame(cx)).await.unwrap().unwrap();
+        }
+        drop(tee);
+        let o = rx.await.unwrap();
+        assert_eq!((o.total, o.error), (16, None));
     }
 
     #[tokio::test]

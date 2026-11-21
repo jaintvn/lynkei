@@ -26,8 +26,16 @@ pub fn strip_hop_by_hop(headers: &mut HeaderMap) {
     for name in listed {
         headers.remove(name);
     }
+    // `te: trailers` is the one TE value allowed end to end (HTTP/2, gRPC depends on it).
+    let keep_te = headers
+        .get(header::TE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.trim().eq_ignore_ascii_case("trailers"));
     for name in HOP_BY_HOP {
         headers.remove(*name);
+    }
+    if keep_te {
+        headers.insert(header::TE, http::HeaderValue::from_static("trailers"));
     }
 }
 
@@ -95,6 +103,18 @@ mod tests {
         strip_hop_by_hop(&mut h);
         assert_eq!(h.len(), 1);
         assert!(h.contains_key("content-type"));
+    }
+
+    #[test]
+    fn keeps_te_trailers_for_grpc() {
+        let mut h = HeaderMap::new();
+        h.insert("te", HeaderValue::from_static("trailers"));
+        strip_hop_by_hop(&mut h);
+        assert_eq!(h.get("te").unwrap(), "trailers");
+        let mut g = HeaderMap::new();
+        g.insert("te", HeaderValue::from_static("gzip"));
+        strip_hop_by_hop(&mut g);
+        assert!(g.get("te").is_none());
     }
 
     #[test]

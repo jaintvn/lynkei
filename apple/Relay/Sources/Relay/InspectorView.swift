@@ -70,7 +70,7 @@ struct InspectorView: View {
             ("Request", formatBytes(tx.requestBodySize)),
             ("TLS", tx.decrypted ? "Decrypted" : (tx.scheme == "https" ? "Encrypted" : "None")),
             ("State", "\(tx.state)".capitalized),
-            ("Scheme", tx.scheme.uppercased()),
+            ("Protocol", protocolLabel(tx)),
         ]
         return LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 1), count: 3), spacing: 1) {
             ForEach(items, id: \.0) { k, v in
@@ -86,6 +86,12 @@ struct InspectorView: View {
         .background(Theme.line)
         .clipShape(RoundedRectangle(cornerRadius: 10))
         .overlay(RoundedRectangle(cornerRadius: 10).stroke(Theme.line))
+    }
+
+    /// "HTTP/2", or "HTTP/1.1 → HTTP/2" when the app and the server legs differ.
+    private func protocolLabel(_ tx: FfiTransaction) -> String {
+        guard let upstream = tx.upstreamHttpVersion, upstream != tx.httpVersion else { return tx.httpVersion }
+        return "\(tx.httpVersion) → \(upstream)"
     }
 
     private func section<C: View>(_ title: String, @ViewBuilder content: () -> C) -> some View {

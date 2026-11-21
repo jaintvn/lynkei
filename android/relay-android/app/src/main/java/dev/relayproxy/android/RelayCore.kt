@@ -61,6 +61,7 @@ object RelayCore {
         }
         val lock = if (t.decrypted) "decrypted" else if (t.scheme == "https") "encrypted" else "plain"
         val err = t.error?.let { " — $it" } ?: ""
-        return "$status ${t.method} ${t.url} · ${t.durationMs}ms · ${t.responseBodySize}B · $lock$err"
+        val proto = t.upstreamHttpVersion?.takeIf { it != t.httpVersion }?.let { "${t.httpVersion}→$it" } ?: t.httpVersion
+        return "$status ${t.method} ${t.url} · $proto · ${t.durationMs}ms · ${t.responseBodySize}B · $lock$err"
     }
 }

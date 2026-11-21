@@ -15,7 +15,8 @@ use http::header::{self, HeaderMap, HeaderName, HeaderValue};
 use http::{Method, Request, Response, StatusCode, Uri, Version};
 use http_body_util::BodyExt;
 use hyper::body::Incoming;
-use hyper::server::conn::http1;
+use hyper::server::conn::{http1, http2};
+use hyper_util::server::conn::auto::Builder as AutoBuilder;
 use hyper::service::service_fn;
 use hyper_rustls::HttpsConnector;
 use hyper_util::client::legacy::Client;
@@ -40,10 +41,13 @@ use crate::{EventSink, ProxyConfig};
 pub const CA_DOWNLOAD_HOST: &str = "relay.ca";
 
 type UpstreamClient = Client<HttpsConnector<HttpConnector>, ProxyBody>;
+/// Prior-knowledge HTTP/2 over plain TCP (h2c), for apps that speak h2c (e.g. gRPC in development).
+type H2cClient = Client<HttpConnector, ProxyBody>;
 
 pub(crate) struct Shared {
     pub ca: Arc<CertAuthority>,
     client: UpstreamClient,
+    h2c: H2cClient,
     sink: Arc<dyn EventSink>,
     next_id: AtomicU64,
     cfg: ProxyConfig,
@@ -103,9 +107,10 @@ pub async fn start(cfg: ProxyConfig, sink: Arc<dyn EventSink>) -> Result<ProxyHa
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let ca = Arc::new(CertAuthority::load_or_create(&cfg.data_dir, provider.clone())?);
     let client = build_upstream_client(provider, &cfg.extra_upstream_roots)?;
+    let h2c = Client::builder(TokioExecutor::new()).http2_only(true).build(HttpConnector::new());
     let listener = TcpListener::bind(cfg.listen).await.with_context(|| format!("binding {}", cfg.listen))?;
     let local_addr = listener.local_addr()?;
-    let shared = Arc::new(Shared { ca, client, sink, next_id: AtomicU64::new(1), cfg });
+    let shared = Arc::new(Shared { ca, client, h2c, sink, next_id: AtomicU64::new(1), cfg });
     let (tx, mut rx) = oneshot::channel();
 
     let accept_shared = shared.clone();
@@ -147,6 +152,7 @@ fn build_upstream_client(provider: Arc<CryptoProvider>, extra_roots: &[Certifica
         .with_tls_config(tls)
         .https_or_http()
         .enable_http1()
+        .enable_http2()
         .build();
     Ok(Client::builder(TokioExecutor::new())
         .pool_idle_timeout(Duration::from_secs(60))
@@ -255,7 +261,10 @@ where
             Ok::<_, Infallible>(forward(&shared, req, "http", Some(authority), peer, false).await)
         }
     });
-    if let Err(e) = http1::Builder::new().preserve_header_case(true).serve_connection(TokioIo::new(client), svc).await {
+    // HTTP/1.1 or h2c with prior knowledge, detected from the connection preface.
+    let mut builder = AutoBuilder::new(TokioExecutor::new());
+    builder.http1().preserve_header_case(true);
+    if let Err(e) = builder.serve_connection(TokioIo::new(client), svc).await {
         tracing::debug!(%host, error = %e, "plain HTTP connection ended with error");
     }
 }
@@ -276,8 +285,7 @@ where
             return;
         }
     };
-    // P0: HTTP/1.1 only on the client leg. HTTP/2 arrives in P1.
-    server_cfg.alpn_protocols = vec![b"http/1.1".to_vec()];
+    server_cfg.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
     let acceptor = TlsAcceptor::from(Arc::new(server_cfg));
 
     let tls = match acceptor.accept(client).await {
@@ -302,8 +310,14 @@ where
         let authority = authority.clone();
         async move { Ok::<_, Infallible>(forward(&shared, req, "https", Some(authority), peer, true).await) }
     });
-    if let Err(e) = http1::Builder::new().preserve_header_case(true).serve_connection(TokioIo::new(tls), svc).await {
-        tracing::debug!(%host, error = %e, "decrypted connection ended with error");
+    let h2 = tls.get_ref().1.alpn_protocol() == Some(b"h2");
+    let result = if h2 {
+        http2::Builder::new(TokioExecutor::new()).serve_connection(TokioIo::new(tls), svc).await
+    } else {
+        http1::Builder::new().preserve_header_case(true).serve_connection(TokioIo::new(tls), svc).await
+    };
+    if let Err(e) = result {
+        tracing::debug!(%host, h2, error = %e, "decrypted connection ended with error");
     }
 }
 
@@ -331,10 +345,12 @@ async fn raw_tunnel<S>(
             open.state = TransactionState::InProgress;
             open.duration_ms = started.elapsed().as_millis() as u64;
             shared.sink.on_transaction(open);
-            let (up, down) = tokio::io::copy_bidirectional(&mut client, &mut upstream).await.unwrap_or((0, 0));
+            // Count on the app's side as bytes flow: copy_bidirectional drops its totals when either
+            // side resets the connection, which many servers and apps do.
+            let (read, written) = relay_tunnel(&mut client, &mut upstream, shared.cfg.tunnel_half_close_grace).await;
             t.state = TransactionState::Tunneled;
-            t.request_body_size = up;
-            t.response_body_size = down;
+            t.request_body_size = read;
+            t.response_body_size = written;
             if passthrough {
                 t.error = Some("SSL passthrough host — not decrypted".into());
             }
@@ -369,10 +385,12 @@ async fn forward(
     let (host, port) = split_authority(&authority, if scheme == "https" { 443 } else { 80 });
     let mut t = base_transaction(shared, parts.method.as_str(), scheme, &host, port, &path, peer, started_ms);
     t.decrypted = decrypted;
+    t.http_version = version_str(parts.version).to_owned();
     t.request_headers = to_headers(&parts.headers);
 
     // Stream the request upstream while keeping a bounded copy for the inspector.
     let (req_tee, req_done) = TeeBody::new(body, shared.cfg.max_preview_bytes);
+    let req_tee = req_tee.with_expected_len(content_length(&parts.headers));
 
     let uri: Uri = match format!("{scheme}://{authority}{path}").parse() {
         Ok(u) => u,
@@ -382,22 +400,29 @@ async fn forward(
     let mut headers = parts.headers.clone();
     strip_hop_by_hop(&mut headers);
     headers.remove(HeaderName::from_static("proxy-authorization"));
-    if let Ok(v) = HeaderValue::from_str(&authority) {
-        headers.insert(header::HOST, v);
-    }
+    // The target URI carries the authority. hyper's client writes `Host` from it on HTTP/1.1 and
+    // `:authority` on HTTP/2; a copied `Host` on HTTP/2 is rejected by strict servers (Google's GFE).
+    headers.remove(header::HOST);
     *out.headers_mut().unwrap() = headers;
     let out = match out.body(req_tee.boxed()) {
         Ok(r) => r,
         Err(e) => return fail(shared, t, started, StatusCode::BAD_REQUEST, format!("building request: {e}")),
     };
 
-    let resp = match tokio::time::timeout(shared.cfg.upstream_timeout, shared.client.request(out)).await {
+    // An app speaking h2c can only be matched by an h2c upstream; everything else negotiates via ALPN.
+    let upstream = if scheme == "http" && parts.version == Version::HTTP_2 {
+        shared.h2c.request(out)
+    } else {
+        shared.client.request(out)
+    };
+    let resp = match tokio::time::timeout(shared.cfg.upstream_timeout, upstream).await {
         Ok(Ok(r)) => r,
         Ok(Err(e)) => return fail(shared, t, started, StatusCode::BAD_GATEWAY, format!("upstream error: {}", error_chain(&e))),
         Err(_) => return fail(shared, t, started, StatusCode::GATEWAY_TIMEOUT, "upstream timed out".into()),
     };
     let (rparts, rbody) = resp.into_parts();
     t.status = Some(rparts.status.as_u16());
+    t.upstream_http_version = Some(version_str(rparts.version).to_owned());
     t.response_headers = to_headers(&rparts.headers);
     // Show the exchange immediately; the final event (same id) follows when the body ends.
     let mut open = t.clone();
@@ -408,6 +433,7 @@ async fn forward(
     // The response streams to the client as it arrives (downloads, SSE, long polls); the
     // transaction is recorded once both bodies have finished or been cut off.
     let (resp_tee, resp_done) = TeeBody::new(rbody, shared.cfg.max_preview_bytes);
+    let resp_tee = resp_tee.with_expected_len(content_length(&rparts.headers));
     let sink = shared.sink.clone();
     let max = shared.cfg.max_preview_bytes;
     let (req_headers, resp_headers) = (parts.headers.clone(), rparts.headers.clone());
@@ -494,6 +520,8 @@ fn base_transaction(
         state: TransactionState::Failed,
         error: None,
         decrypted: false,
+        http_version: "HTTP/1.1".to_owned(),
+        upstream_http_version: None,
         request_headers: vec![],
         response_headers: vec![],
         request_body_size: 0,
@@ -521,6 +549,21 @@ fn split_authority(authority: &str, default_port: u16) -> (String, u16) {
     }
 }
 
+fn content_length(h: &HeaderMap) -> Option<u64> {
+    h.get(header::CONTENT_LENGTH)?.to_str().ok()?.trim().parse().ok()
+}
+
+fn version_str(v: Version) -> &'static str {
+    match v {
+        Version::HTTP_09 => "HTTP/0.9",
+        Version::HTTP_10 => "HTTP/1.0",
+        Version::HTTP_11 => "HTTP/1.1",
+        Version::HTTP_2 => "HTTP/2",
+        Version::HTTP_3 => "HTTP/3",
+        _ => "HTTP/?",
+    }
+}
+
 fn now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
@@ -534,6 +577,76 @@ fn error_chain(e: &dyn std::error::Error) -> String {
         src = inner.source();
     }
     s
+}
+
+/// Copies both directions of a tunnel and returns (bytes from the app, bytes to the app).
+///
+/// Bytes are counted as they flow, so totals survive resets (copy_bidirectional drops them on
+/// error). When one direction ends, the other gets `grace` to finish before both are closed.
+async fn relay_tunnel<C, U>(client: &mut C, upstream: &mut U, grace: Duration) -> (u64, u64)
+where
+    C: AsyncRead + AsyncWrite + Unpin,
+    U: AsyncRead + AsyncWrite + Unpin,
+{
+    use tokio::io::AsyncWriteExt;
+    let mut counted = Counted::new(client);
+    let (read, written) = (counted.read.clone(), counted.written.clone());
+    let (mut cr, mut cw) = tokio::io::split(&mut counted);
+    let (mut ur, mut uw) = tokio::io::split(upstream);
+    let up = async {
+        let _ = tokio::io::copy(&mut cr, &mut uw).await;
+        let _ = uw.shutdown().await;
+    };
+    let down = async {
+        let _ = tokio::io::copy(&mut ur, &mut cw).await;
+        let _ = cw.shutdown().await;
+    };
+    tokio::pin!(up, down);
+    tokio::select! {
+        _ = &mut up => { let _ = tokio::time::timeout(grace, &mut down).await; }
+        _ = &mut down => { let _ = tokio::time::timeout(grace, &mut up).await; }
+    }
+    (read.load(Ordering::Relaxed), written.load(Ordering::Relaxed))
+}
+
+/// Counts bytes read from (app → server) and written to (server → app) the wrapped stream.
+struct Counted<S> {
+    inner: S,
+    read: Arc<AtomicU64>,
+    written: Arc<AtomicU64>,
+}
+
+impl<S> Counted<S> {
+    fn new(inner: S) -> Self {
+        Self { inner, read: Arc::default(), written: Arc::default() }
+    }
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for Counted<S> {
+    fn poll_read(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+        let before = buf.filled().len();
+        let r = Pin::new(&mut self.inner).poll_read(cx, buf);
+        if let Poll::Ready(Ok(())) = r {
+            self.read.fetch_add((buf.filled().len() - before) as u64, Ordering::Relaxed);
+        }
+        r
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for Counted<S> {
+    fn poll_write(mut self: Pin<&mut Self>, cx: &mut Context<'_>, data: &[u8]) -> Poll<io::Result<usize>> {
+        let r = Pin::new(&mut self.inner).poll_write(cx, data);
+        if let Poll::Ready(Ok(n)) = r {
+            self.written.fetch_add(n as u64, Ordering::Relaxed);
+        }
+        r
+    }
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
 }
 
 /// A stream that replays already-read bytes before reading from the inner stream.

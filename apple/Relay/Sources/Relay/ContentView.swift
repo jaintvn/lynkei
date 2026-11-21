@@ -203,6 +203,7 @@ struct StatusPill: View {
         switch tx.state {
         case .tunneled: return "TUN"
         case .failed: return "ERR"
+        case .inProgress: return tx.status.map { "\($0)…" } ?? "…"
         case .complete: return tx.status.map(String.init) ?? "—"
         }
     }
@@ -212,6 +213,7 @@ struct StatusPill: View {
 func statusColor(_ tx: FfiTransaction) -> Color {
     if tx.state == .failed { return Theme.failed }
     if tx.state == .tunneled { return Theme.s3xx }
+    if tx.state == .inProgress { return Theme.accent }
     switch tx.status ?? 0 {
     case 200..<300: return Theme.s2xx
     case 300..<400: return Theme.s3xx

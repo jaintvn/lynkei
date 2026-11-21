@@ -143,6 +143,7 @@ async fn get(args: &Args) -> Result<()> {
 
 fn one_line(t: &Transaction) -> String {
     let status = match (t.state, t.status) {
+        (TransactionState::InProgress, _) => "…".to_string(),
         (TransactionState::Tunneled, _) => "TUNNEL".to_string(),
         (TransactionState::Failed, _) => "FAILED".to_string(),
         (_, Some(s)) => s.to_string(),

@@ -13,7 +13,7 @@ use anyhow::{Context as _, Result};
 use bytes::Bytes;
 use http::header::{self, HeaderMap, HeaderName, HeaderValue};
 use http::{Method, Request, Response, StatusCode, Uri, Version};
-use http_body_util::{BodyExt, Full};
+use http_body_util::BodyExt;
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
@@ -33,12 +33,13 @@ use tokio_rustls::TlsAcceptor;
 use crate::body::{body_preview, strip_hop_by_hop};
 use crate::ca::{CertAuthority, SniResolver};
 use crate::sniff;
+use crate::tee::{ProxyBody, TeeBody, TeeOutcome, full};
 use crate::{EventSink, ProxyConfig};
 
 /// Magic host that serves the Relay CA certificate (open http://relay.ca on a device).
 pub const CA_DOWNLOAD_HOST: &str = "relay.ca";
 
-type UpstreamClient = Client<HttpsConnector<HttpConnector>, Full<Bytes>>;
+type UpstreamClient = Client<HttpsConnector<HttpConnector>, ProxyBody>;
 
 pub(crate) struct Shared {
     pub ca: Arc<CertAuthority>,
@@ -167,7 +168,7 @@ async fn serve_client(shared: Arc<Shared>, stream: TcpStream, peer: SocketAddr) 
     }
 }
 
-async fn handle_proxy_request(shared: Arc<Shared>, peer: SocketAddr, req: Request<Incoming>) -> Response<Full<Bytes>> {
+async fn handle_proxy_request(shared: Arc<Shared>, peer: SocketAddr, req: Request<Incoming>) -> Response<ProxyBody> {
     if req.method() == Method::CONNECT {
         let Some(authority) = req.uri().authority().cloned() else {
             return text_response(StatusCode::BAD_REQUEST, "CONNECT needs host:port");
@@ -180,7 +181,7 @@ async fn handle_proxy_request(shared: Arc<Shared>, peer: SocketAddr, req: Reques
                 Err(e) => tracing::debug!(error = %e, "CONNECT upgrade failed"),
             }
         });
-        return Response::new(Full::new(Bytes::new()));
+        return Response::new(full(Bytes::new()));
     }
 
     let host = req.uri().host().map(str::to_owned).or_else(|| host_header(req.headers()));
@@ -326,6 +327,10 @@ async fn raw_tunnel<S>(
     match TcpStream::connect((host.as_str(), port)).await {
         Ok(mut upstream) => {
             let _ = upstream.set_nodelay(true);
+            let mut open = t.clone();
+            open.state = TransactionState::InProgress;
+            open.duration_ms = started.elapsed().as_millis() as u64;
+            shared.sink.on_transaction(open);
             let (up, down) = tokio::io::copy_bidirectional(&mut client, &mut upstream).await.unwrap_or((0, 0));
             t.state = TransactionState::Tunneled;
             t.request_body_size = up;
@@ -351,7 +356,7 @@ async fn forward(
     tls_authority: Option<String>,
     peer: SocketAddr,
     decrypted: bool,
-) -> Response<Full<Bytes>> {
+) -> Response<ProxyBody> {
     let started = Instant::now();
     let started_ms = now_ms();
     let (parts, body) = req.into_parts();
@@ -366,12 +371,8 @@ async fn forward(
     t.decrypted = decrypted;
     t.request_headers = to_headers(&parts.headers);
 
-    let req_body = match body.collect().await {
-        Ok(b) => b.to_bytes(),
-        Err(e) => return fail(shared, t, started, StatusCode::BAD_REQUEST, format!("reading request body: {e}")),
-    };
-    t.request_body_size = req_body.len() as u64;
-    t.request_body_preview = body_preview(&parts.headers, &req_body, shared.cfg.max_preview_bytes);
+    // Stream the request upstream while keeping a bounded copy for the inspector.
+    let (req_tee, req_done) = TeeBody::new(body, shared.cfg.max_preview_bytes);
 
     let uri: Uri = match format!("{scheme}://{authority}{path}").parse() {
         Ok(u) => u,
@@ -385,7 +386,7 @@ async fn forward(
         headers.insert(header::HOST, v);
     }
     *out.headers_mut().unwrap() = headers;
-    let out = match out.body(Full::new(req_body)) {
+    let out = match out.body(req_tee.boxed()) {
         Ok(r) => r,
         Err(e) => return fail(shared, t, started, StatusCode::BAD_REQUEST, format!("building request: {e}")),
     };
@@ -396,20 +397,39 @@ async fn forward(
         Err(_) => return fail(shared, t, started, StatusCode::GATEWAY_TIMEOUT, "upstream timed out".into()),
     };
     let (rparts, rbody) = resp.into_parts();
-    let resp_body = match rbody.collect().await {
-        Ok(b) => b.to_bytes(),
-        Err(e) => return fail(shared, t, started, StatusCode::BAD_GATEWAY, format!("reading upstream body: {e}")),
-    };
-
     t.status = Some(rparts.status.as_u16());
     t.response_headers = to_headers(&rparts.headers);
-    t.response_body_size = resp_body.len() as u64;
-    t.response_body_preview = body_preview(&rparts.headers, &resp_body, shared.cfg.max_preview_bytes);
-    t.state = TransactionState::Complete;
-    t.duration_ms = started.elapsed().as_millis() as u64;
-    shared.sink.on_transaction(t);
+    // Show the exchange immediately; the final event (same id) follows when the body ends.
+    let mut open = t.clone();
+    open.state = TransactionState::InProgress;
+    open.duration_ms = started.elapsed().as_millis() as u64;
+    shared.sink.on_transaction(open);
 
-    let mut response = Response::new(Full::new(resp_body));
+    // The response streams to the client as it arrives (downloads, SSE, long polls); the
+    // transaction is recorded once both bodies have finished or been cut off.
+    let (resp_tee, resp_done) = TeeBody::new(rbody, shared.cfg.max_preview_bytes);
+    let sink = shared.sink.clone();
+    let max = shared.cfg.max_preview_bytes;
+    let (req_headers, resp_headers) = (parts.headers.clone(), rparts.headers.clone());
+    tokio::spawn(async move {
+        let req = req_done.await.unwrap_or_default();
+        let resp = resp_done.await.unwrap_or_default();
+        t.request_body_size = req.total;
+        t.request_body_preview = preview(&req_headers, &req, max);
+        t.response_body_size = resp.total;
+        t.response_body_preview = preview(&resp_headers, &resp, max);
+        t.duration_ms = started.elapsed().as_millis() as u64;
+        match resp.error {
+            Some(e) => {
+                t.state = TransactionState::Failed;
+                t.error = Some(format!("response interrupted after {} bytes: {e}", resp.total));
+            }
+            None => t.state = TransactionState::Complete,
+        }
+        sink.on_transaction(t);
+    });
+
+    let mut response = Response::new(resp_tee.boxed());
     *response.status_mut() = rparts.status;
     let mut rheaders = rparts.headers;
     strip_hop_by_hop(&mut rheaders);
@@ -417,7 +437,15 @@ async fn forward(
     response
 }
 
-fn fail(shared: &Shared, mut t: Transaction, started: Instant, status: StatusCode, msg: String) -> Response<Full<Bytes>> {
+fn preview(headers: &HeaderMap, o: &TeeOutcome, max: usize) -> Option<String> {
+    let mut p = body_preview(headers, &o.captured, max)?;
+    if o.truncated && !p.ends_with("[truncated]") {
+        p.push_str(&format!("\n…[truncated — first {} of {} bytes captured]", o.captured.len(), o.total));
+    }
+    Some(p)
+}
+
+fn fail(shared: &Shared, mut t: Transaction, started: Instant, status: StatusCode, msg: String) -> Response<ProxyBody> {
     t.state = TransactionState::Failed;
     t.duration_ms = started.elapsed().as_millis() as u64;
     t.error = Some(msg.clone());
@@ -425,8 +453,8 @@ fn fail(shared: &Shared, mut t: Transaction, started: Instant, status: StatusCod
     text_response(status, &format!("Relay: {msg}\n"))
 }
 
-fn ca_download_response(shared: &Shared) -> Response<Full<Bytes>> {
-    let mut r = Response::new(Full::new(Bytes::from(shared.ca.ca_pem().to_owned())));
+fn ca_download_response(shared: &Shared) -> Response<ProxyBody> {
+    let mut r = Response::new(full(Bytes::from(shared.ca.ca_pem().to_owned())));
     r.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("application/x-x509-ca-cert"));
     r.headers_mut().insert(
         header::CONTENT_DISPOSITION,
@@ -435,8 +463,8 @@ fn ca_download_response(shared: &Shared) -> Response<Full<Bytes>> {
     r
 }
 
-fn text_response(status: StatusCode, msg: &str) -> Response<Full<Bytes>> {
-    let mut r = Response::new(Full::new(Bytes::from(msg.to_owned())));
+fn text_response(status: StatusCode, msg: &str) -> Response<ProxyBody> {
+    let mut r = Response::new(full(Bytes::from(msg.to_owned())));
     *r.status_mut() = status;
     r.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("text/plain; charset=utf-8"));
     r

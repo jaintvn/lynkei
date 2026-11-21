@@ -61,12 +61,24 @@ final class TrafficStore {
 
     func clear() {
         transactions.removeAll()
+        indexById.removeAll()
         selection = nil
     }
 
+    /// Position of each transaction id in `transactions`, so a later event (same id) replaces the row.
+    private var indexById: [UInt64: Int] = [:]
+
     private func append(_ tx: FfiTransaction) {
+        if let i = indexById[tx.id], i < transactions.count, transactions[i].id == tx.id {
+            transactions[i] = tx
+            return
+        }
+        indexById[tx.id] = transactions.count
         transactions.append(tx)
-        if transactions.count > 50_000 { transactions.removeFirst(transactions.count - 50_000) }
+        if transactions.count > 50_000 {
+            transactions.removeFirst(transactions.count - 50_000)
+            indexById = Dictionary(uniqueKeysWithValues: transactions.enumerated().map { ($1.id, $0) })
+        }
     }
 }
 

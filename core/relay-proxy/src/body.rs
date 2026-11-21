@@ -63,10 +63,12 @@ pub fn body_preview(headers: &HeaderMap, body: &[u8], max_bytes: usize) -> Optio
     Some(text)
 }
 
+/// Decompresses up to `max_bytes`. Keeps whatever decoded before an error, because streamed bodies
+/// are captured only up to a limit and the compressed tail may be missing.
 fn inflate(mut r: impl Read, max_bytes: usize) -> Option<Vec<u8>> {
     let mut out = Vec::new();
-    r.by_ref().take(max_bytes as u64 + 1).read_to_end(&mut out).ok()?;
-    Some(out)
+    let _ = r.by_ref().take(max_bytes as u64 + 1).read_to_end(&mut out);
+    (!out.is_empty()).then_some(out)
 }
 
 fn is_textual(ct: &str) -> bool {

@@ -16,6 +16,9 @@ pub enum TransactionState {
     Failed,
     /// Bytes were relayed without decryption (non-TLS CONNECT or a passthrough host).
     Tunneled,
+    /// Still open: response headers received (body streaming) or tunnel connected. A later event
+    /// with the same `id` replaces this one.
+    InProgress,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

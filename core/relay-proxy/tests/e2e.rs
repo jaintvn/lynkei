@@ -95,7 +95,16 @@ async fn start_proxy(origin_ca: CertificateDer<'static>, passthrough: &[&str]) -
     cfg.passthrough_hosts = passthrough.iter().map(|s| s.to_string()).collect();
     let log: Log = Arc::default();
     let sink_log = log.clone();
-    let handle = relay_proxy::start(cfg, Arc::new(move |t: Transaction| sink_log.lock().unwrap().push(t)))
+    let handle = relay_proxy::start(
+        cfg,
+        Arc::new(move |t: Transaction| {
+            let mut log = sink_log.lock().unwrap();
+            match log.iter_mut().find(|e| e.id == t.id) {
+                Some(e) => *e = t,
+                None => log.push(t),
+            }
+        }),
+    )
         .await
         .unwrap();
     let relay_ca = CertificateDer::from_pem_slice(handle.ca_pem().as_bytes()).unwrap();
@@ -106,14 +115,18 @@ fn rand_suffix() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos() as u64
 }
 
+/// Waits until `n` transactions reached a final state, and returns those.
 async fn wait_for(log: &Log, n: usize) -> Vec<Transaction> {
-    for _ in 0..100 {
-        if log.lock().unwrap().len() >= n {
+    let finals = || -> Vec<Transaction> {
+        log.lock().unwrap().iter().filter(|t| t.state != TransactionState::InProgress).cloned().collect()
+    };
+    for _ in 0..150 {
+        if finals().len() >= n {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    log.lock().unwrap().clone()
+    finals()
 }
 
 #[tokio::test]
@@ -161,7 +174,15 @@ async fn passthrough_hosts_are_tunneled_not_decrypted() {
     // Real origin certificate reaches the client untouched.
     let res = fetch_via_proxy(proxy.local_addr, &url, &[origin_ca]).await.unwrap();
     assert_eq!(res.status, 200);
-    drop(proxy); // tunnel is recorded when it closes
+    // Visible while the tunnel is still open (P0 only showed it after it closed).
+    for _ in 0..50 {
+        if !log.lock().unwrap().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(log.lock().unwrap()[0].state, TransactionState::InProgress);
+    drop(proxy); // final event when the tunnel closes
     let txs = wait_for(&log, 1).await;
     assert_eq!(txs[0].state, TransactionState::Tunneled);
     assert!(!txs[0].decrypted);
@@ -245,4 +266,156 @@ async fn transparent_plain_http_uses_host_header() {
 
     let t = wait_for(&log, 1).await.remove(0);
     assert_eq!((t.scheme.as_str(), t.path.as_str(), t.state), ("http", "/health?x=1", TransactionState::Complete));
+}
+
+// ---------- streaming ----------
+
+type BoxError = Box<dyn std::error::Error + Send + Sync>;
+
+/// Body backed by a channel, so the origin can send chunks over time (SSE-style).
+struct ChannelBody(tokio::sync::mpsc::Receiver<Bytes>);
+impl hyper::body::Body for ChannelBody {
+    type Data = Bytes;
+    type Error = BoxError;
+    fn poll_frame(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<hyper::body::Frame<Bytes>, BoxError>>> {
+        self.0.poll_recv(cx).map(|o| o.map(|b| Ok(hyper::body::Frame::data(b))))
+    }
+}
+
+enum StreamOrigin {
+    Chunks(ChannelBody),
+    Full(Full<Bytes>),
+}
+impl hyper::body::Body for StreamOrigin {
+    type Data = Bytes;
+    type Error = BoxError;
+    fn poll_frame(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<hyper::body::Frame<Bytes>, BoxError>>> {
+        match self.get_mut() {
+            StreamOrigin::Chunks(c) => std::pin::Pin::new(c).poll_frame(cx),
+            StreamOrigin::Full(f) => std::pin::Pin::new(f).poll_frame(cx).map_err(|never| match never {}),
+        }
+    }
+}
+
+const BIG: usize = 5 * 1024 * 1024;
+
+/// /sse: two events 400 ms apart, then a long pause (until the client leaves); /big: 5 MB of text.
+async fn start_streaming_origin() -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        loop {
+            let (s, _) = listener.accept().await.unwrap();
+            tokio::spawn(async move {
+                let svc = service_fn(|req: Request<hyper::body::Incoming>| async move {
+                    let resp = match req.uri().path() {
+                        "/sse" | "/sse-forever" => {
+                            let forever = req.uri().path() == "/sse-forever";
+                            let (tx, rx) = tokio::sync::mpsc::channel(4);
+                            tokio::spawn(async move {
+                                let _ = tx.send(Bytes::from_static(b"data: one\n\n")).await;
+                                tokio::time::sleep(Duration::from_millis(400)).await;
+                                let _ = tx.send(Bytes::from_static(b"data: two\n\n")).await;
+                                if forever {
+                                    tokio::time::sleep(Duration::from_secs(30)).await;
+                                }
+                            });
+                            Response::builder()
+                                .header("content-type", "text/event-stream")
+                                .body(StreamOrigin::Chunks(ChannelBody(rx)))
+                                .unwrap()
+                        }
+                        _ => Response::builder()
+                            .header("content-type", "text/plain")
+                            .body(StreamOrigin::Full(Full::new(Bytes::from(vec![b'x'; BIG]))))
+                            .unwrap(),
+                    };
+                    Ok::<_, Infallible>(resp)
+                });
+                let _ = hyper::server::conn::http1::Builder::new().serve_connection(TokioIo::new(s), svc).await;
+            });
+        }
+    });
+    port
+}
+
+async fn plain_client(proxy: SocketAddr) -> hyper::client::conn::http1::SendRequest<http_body_util::Empty<Bytes>> {
+    let s = tokio::net::TcpStream::connect(proxy).await.unwrap();
+    let (sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(s)).await.unwrap();
+    tokio::spawn(conn);
+    sender
+}
+
+#[tokio::test]
+async fn streams_responses_as_they_arrive() {
+    use http_body_util::BodyExt;
+    let origin = start_streaming_origin().await;
+    let (_tls, origin_ca) = start_https_origin().await;
+    let (proxy, log, _ca) = start_proxy(origin_ca, &[]).await;
+    let mut client = plain_client(proxy.local_addr).await;
+
+    let started = std::time::Instant::now();
+    let req = Request::get(format!("http://127.0.0.1:{origin}/sse")).body(http_body_util::Empty::new()).unwrap();
+    let mut body = client.send_request(req).await.unwrap().into_body();
+    let first = body.frame().await.unwrap().unwrap().into_data().unwrap();
+    let first_at = started.elapsed();
+    assert_eq!(&first[..], b"data: one\n\n");
+    assert!(first_at < Duration::from_millis(300), "first event must not wait for the whole stream ({first_at:?})");
+    {
+        let open = log.lock().unwrap().clone();
+        assert_eq!(open.len(), 1, "visible while still streaming");
+        assert_eq!((open[0].state, open[0].status), (TransactionState::InProgress, Some(200)));
+    }
+
+    let rest = body.collect().await.unwrap().to_bytes();
+    assert_eq!(&rest[..], b"data: two\n\n");
+    let t = wait_for(&log, 1).await.remove(0);
+    assert_eq!((t.state, t.response_body_size), (TransactionState::Complete, 22));
+    assert!(t.duration_ms >= 400);
+    assert_eq!(t.response_body_preview.as_deref(), Some("data: one\n\ndata: two\n\n"));
+}
+
+#[tokio::test]
+async fn large_bodies_are_forwarded_whole_but_captured_partially() {
+    use http_body_util::BodyExt;
+    let origin = start_streaming_origin().await;
+    let (_tls, origin_ca) = start_https_origin().await;
+    let (proxy, log, _ca) = start_proxy(origin_ca, &[]).await;
+    let mut client = plain_client(proxy.local_addr).await;
+
+    let req = Request::get(format!("http://127.0.0.1:{origin}/big")).body(http_body_util::Empty::new()).unwrap();
+    let body = client.send_request(req).await.unwrap().into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(body.len(), BIG, "client receives every byte");
+
+    let t = wait_for(&log, 1).await.remove(0);
+    assert_eq!((t.state, t.response_body_size), (TransactionState::Complete, BIG as u64));
+    let p = t.response_body_preview.unwrap();
+    assert!(p.len() < 300 * 1024, "capture is bounded, not the whole 5 MB");
+    assert!(p.contains("truncated"), "preview says it is partial");
+}
+
+#[tokio::test]
+async fn client_hanging_up_mid_stream_is_recorded() {
+    use http_body_util::BodyExt;
+    let origin = start_streaming_origin().await;
+    let (_tls, origin_ca) = start_https_origin().await;
+    let (proxy, log, _ca) = start_proxy(origin_ca, &[]).await;
+    let mut client = plain_client(proxy.local_addr).await;
+
+    let req = Request::get(format!("http://127.0.0.1:{origin}/sse-forever")).body(http_body_util::Empty::new()).unwrap();
+    let mut body = client.send_request(req).await.unwrap().into_body();
+    let _ = body.frame().await;
+    drop(body);
+    drop(client);
+
+    let t = wait_for(&log, 1).await.remove(0);
+    assert_eq!(t.state, TransactionState::Failed);
+    assert!(t.error.as_deref().unwrap().contains("interrupted"), "{:?}", t.error);
+    assert!(t.response_body_size >= 11);
 }

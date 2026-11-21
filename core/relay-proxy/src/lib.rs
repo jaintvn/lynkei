@@ -6,6 +6,7 @@ pub mod body;
 pub mod ca;
 pub mod client;
 pub mod sniff;
+pub mod tee;
 mod proxy;
 
 use std::net::SocketAddr;
@@ -16,7 +17,9 @@ pub use proxy::{CA_DOWNLOAD_HOST, ProxyHandle, TransparentHandler, start};
 pub use relay_model::{Header, Transaction, TransactionState};
 pub use rustls::pki_types::CertificateDer;
 
-/// Receives every finished exchange. Called from engine threads: implementations must not block.
+/// Receives exchanges as they progress. The same `id` may be delivered more than once — first as
+/// `InProgress`, then with its final state — and later deliveries replace earlier ones.
+/// Called from engine threads: implementations must not block.
 pub trait EventSink: Send + Sync + 'static {
     fn on_transaction(&self, transaction: Transaction);
 }

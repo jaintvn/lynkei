@@ -32,6 +32,8 @@ pub enum FfiState {
     Complete,
     Failed,
     Tunneled,
+    /// Still open; a later event with the same id replaces it.
+    InProgress,
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
@@ -74,6 +76,7 @@ impl From<Transaction> for FfiTransaction {
                 TransactionState::Complete => FfiState::Complete,
                 TransactionState::Failed => FfiState::Failed,
                 TransactionState::Tunneled => FfiState::Tunneled,
+                TransactionState::InProgress => FfiState::InProgress,
             },
             error: t.error,
             decrypted: t.decrypted,

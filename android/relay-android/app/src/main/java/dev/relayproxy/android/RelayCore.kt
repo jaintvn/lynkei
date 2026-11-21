@@ -56,6 +56,7 @@ object RelayCore {
         val status = when (t.state) {
             FfiState.TUNNELED -> "TUNNEL"
             FfiState.FAILED -> "FAILED"
+            FfiState.IN_PROGRESS -> "OPEN"
             FfiState.COMPLETE -> t.status?.toString() ?: "-"
         }
         val lock = if (t.decrypted) "decrypted" else if (t.scheme == "https") "encrypted" else "plain"

@@ -11,3 +11,7 @@ license = "Apache-2.0"
 lto = "thin"
 codegen-units = 1
 strip = true
+
+[patch.crates-io]
+# Vendored with a fix for app-side FIN/RST not waking readers (see vendor/ipstack/VENDORED.md).
+ipstack = { path = "vendor/ipstack" }

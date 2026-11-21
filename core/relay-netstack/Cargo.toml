@@ -11,3 +11,7 @@ libc = "0.2.191"
 relay-proxy = { version = "0.1.0", path = "../relay-proxy" }
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "net", "io-util", "macros", "sync", "time"] }
 tracing = "0.1.44"
+
+[dev-dependencies]
+etherparse = "0.20"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "io-util", "time"] }

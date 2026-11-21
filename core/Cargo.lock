@@ -642,8 +642,6 @@ dependencies = [
 [[package]]
 name = "ipstack"
 version = "1.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e889a45c1ce3e97268ad2249951528563ec1d02a120fecbd4db690beac34f7fd"
 dependencies = [
  "ahash",
  "etherparse",
@@ -949,6 +947,7 @@ name = "relay-netstack"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "etherparse",
  "ipstack",
  "libc",
  "relay-proxy",

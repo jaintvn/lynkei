@@ -5,16 +5,17 @@
 pub mod body;
 pub mod ca;
 pub mod client;
+mod proxy;
 pub mod sniff;
 pub mod tee;
-mod proxy;
+pub mod ws;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
 pub use proxy::{CA_DOWNLOAD_HOST, ProxyHandle, TransparentHandler, start};
-pub use relay_model::{Header, Transaction, TransactionState};
+pub use relay_model::{Header, Transaction, TransactionState, WsDirection, WsKind, WsMessage};
 pub use rustls::pki_types::CertificateDer;
 
 /// Receives exchanges as they progress. The same `id` may be delivered more than once — first as
@@ -39,6 +40,10 @@ pub struct ProxyConfig {
     pub passthrough_hosts: Vec<String>,
     pub max_preview_bytes: usize,
     pub upstream_timeout: Duration,
+    /// Time allowed to open a TCP connection to a server.
+    pub connect_timeout: Duration,
+    /// If the listen port is busy, try up to this many following ports.
+    pub port_fallback: u16,
     /// After one side of a tunnel finishes, how long the other side may keep going before both are
     /// closed. Some servers (Apple's) only close at their idle timeout, which would leave the
     /// tunnel "open" long after the app left.
@@ -55,6 +60,8 @@ impl ProxyConfig {
             passthrough_hosts: default_passthrough(),
             max_preview_bytes: 256 * 1024,
             upstream_timeout: Duration::from_secs(60),
+            connect_timeout: Duration::from_secs(10),
+            port_fallback: 10,
             tunnel_half_close_grace: Duration::from_secs(5),
             extra_upstream_roots: vec![],
         }
@@ -105,7 +112,10 @@ mod tests {
     fn passthrough_matches_suffix_only_on_label_boundary() {
         let cfg = ProxyConfig::new("127.0.0.1:0".parse().unwrap(), "/tmp");
         assert!(cfg.is_passthrough("api.push.apple.com"));
-        assert!(cfg.is_passthrough("www.apple.com"), "Apple pins apple.com system-wide");
+        assert!(
+            cfg.is_passthrough("www.apple.com"),
+            "Apple pins apple.com system-wide"
+        );
         assert!(cfg.is_passthrough("icloud.com."));
         assert!(!cfg.is_passthrough("httpbin.org"));
         assert!(!cfg.is_passthrough("notpush.apple.com.evil.test"));

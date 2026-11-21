@@ -1,0 +1,42 @@
+# yaml-language-server: $schema=./rules.schema.json
+# Relay rules — commit this file next to your app. Validate with: relay rules check <file>
+version: 1
+rules:
+  - id: new-checkout
+    name: Force feature flag new_checkout = true
+    kind: rewrite
+    match: { method: GET, host: api.acmeshop.com, path: /v2/feature-flags }
+    phase: response
+    actions:
+      - set_json: { path: $.flags.new_checkout, value: true }
+      - set_header: { name: cache-control, value: no-store }
+
+  - id: empty-recs
+    name: Empty recommendations
+    kind: map_local
+    match: { host: acmeshop.com, path: /v2/recommendations }
+    file: mocks/recommendations_empty.json
+    headers: { content-type: application/json }
+
+  - id: staging
+    name: Production API → staging
+    kind: map_remote
+    match: { host: api.acmeshop.com }
+    to: https://staging.acmeshop.com
+    enabled: false
+
+  - id: pause-checkout
+    name: Pause checkout responses
+    kind: breakpoint
+    match: { method: POST, path: /v2/checkout }
+    phase: response
+
+  - id: no-ads
+    kind: block
+    match: { host: "*.doubleclick.net" }
+
+  - id: lossy-pixel
+    name: LTE – lossy on search
+    kind: throttle
+    match: { path: /v2/search }
+    profile: lte-lossy

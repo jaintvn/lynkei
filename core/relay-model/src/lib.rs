@@ -1,5 +1,8 @@
 //! Shared data model for Relay. Pure data: no I/O, no platform code.
 
+pub mod filter;
+pub mod rules;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -19,6 +22,38 @@ pub enum TransactionState {
     /// Still open: response headers received (body streaming) or tunnel connected. A later event
     /// with the same `id` replaces this one.
     InProgress,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WsDirection {
+    /// App → server.
+    Send,
+    /// Server → app.
+    Receive,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WsKind {
+    Text,
+    Binary,
+    Continuation,
+    Close,
+    Ping,
+    Pong,
+    Other,
+}
+
+/// One WebSocket frame seen on an upgraded connection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WsMessage {
+    pub direction: WsDirection,
+    pub kind: WsKind,
+    /// Payload size in bytes.
+    pub size: u64,
+    /// Text (or close reason) preview, capped; `None` for binary frames.
+    pub preview: Option<String>,
+    /// Milliseconds since the connection was upgraded.
+    pub at_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,6 +88,9 @@ pub struct Transaction {
     pub request_body_preview: Option<String>,
     pub response_body_preview: Option<String>,
     pub client_addr: String,
+    /// Frames of an upgraded WebSocket connection (capped per connection).
+    #[serde(default)]
+    pub websocket_messages: Vec<WsMessage>,
 }
 
 fn default_version() -> String {
@@ -61,7 +99,10 @@ fn default_version() -> String {
 
 impl Transaction {
     pub fn url(&self) -> String {
-        let default_port = matches!((self.scheme.as_str(), self.port), ("http", 80) | ("https", 443));
+        let default_port = matches!(
+            (self.scheme.as_str(), self.port),
+            ("http", 80) | ("https", 443)
+        );
         if default_port {
             format!("{}://{}{}", self.scheme, self.host, self.path)
         } else {
@@ -98,23 +139,36 @@ mod tests {
             http_version: "HTTP/2".into(),
             upstream_http_version: Some("HTTP/2".into()),
             request_headers: vec![],
-            response_headers: vec![Header { name: "Content-Type".into(), value: "application/json".into() }],
+            response_headers: vec![Header {
+                name: "Content-Type".into(),
+                value: "application/json".into(),
+            }],
             request_body_size: 0,
             response_body_size: 0,
             request_body_preview: None,
             response_body_preview: None,
             client_addr: "127.0.0.1:5000".into(),
+            websocket_messages: vec![],
         }
     }
 
     #[test]
     fn url_omits_default_ports() {
-        assert_eq!(tx("https", 443).url(), "https://api.acmeshop.com/v2/products?page=2");
-        assert_eq!(tx("http", 8080).url(), "http://api.acmeshop.com:8080/v2/products?page=2");
+        assert_eq!(
+            tx("https", 443).url(),
+            "https://api.acmeshop.com/v2/products?page=2"
+        );
+        assert_eq!(
+            tx("http", 8080).url(),
+            "http://api.acmeshop.com:8080/v2/products?page=2"
+        );
     }
 
     #[test]
     fn header_lookup_is_case_insensitive() {
-        assert_eq!(tx("https", 443).response_header("content-type"), Some("application/json"));
+        assert_eq!(
+            tx("https", 443).response_header("content-type"),
+            Some("application/json")
+        );
     }
 }

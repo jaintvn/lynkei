@@ -70,16 +70,25 @@ fn tcp(seq: u32, ack: Option<u32>, flags: &str) -> Vec<u8> {
 async fn established() -> (Tun, ipstack::IpStackTcpStream, u32, IpStack) {
     let (ours, theirs) = tokio::io::duplex(64 * 1024);
     let mut stack = IpStack::new(IpStackConfig::default(), theirs);
-    let mut tun = Tun { dev: ours, pending: Vec::new() };
+    let mut tun = Tun {
+        dev: ours,
+        pending: Vec::new(),
+    };
 
     tun.send(tcp(APP_ISN, None, "S")).await;
-    let stream = match tokio::time::timeout(Duration::from_secs(2), stack.accept()).await.unwrap().unwrap() {
+    let stream = match tokio::time::timeout(Duration::from_secs(2), stack.accept())
+        .await
+        .unwrap()
+        .unwrap()
+    {
         IpStackStream::Tcp(t) => t,
         _ => panic!("expected a TCP stream"),
     };
     let syn_ack = tun.recv().await;
     let parsed = SlicedPacket::from_ip(&syn_ack).unwrap();
-    let Some(TransportSlice::Tcp(t)) = parsed.transport else { panic!("expected TCP") };
+    let Some(TransportSlice::Tcp(t)) = parsed.transport else {
+        panic!("expected TCP")
+    };
     assert!(t.syn() && t.ack(), "SYN-ACK from the stack");
     let server_next = t.sequence_number().wrapping_add(1);
     tun.send(tcp(APP_ISN + 1, Some(server_next), "A")).await;
@@ -97,7 +106,10 @@ async fn reader_wakes_when_app_resets() {
 
     tun.send(tcp(APP_ISN + 1, Some(server_next), "RA")).await;
     let result = tokio::time::timeout(Duration::from_secs(1), reader).await;
-    assert!(result.is_ok(), "reader must wake within 1 s after RST (was ~60 s before the patch)");
+    assert!(
+        result.is_ok(),
+        "reader must wake within 1 s after RST (was ~60 s before the patch)"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

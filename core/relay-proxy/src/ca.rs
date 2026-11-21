@@ -9,8 +9,8 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Context, Result};
 use lru::LruCache;
 use rcgen::{
-    BasicConstraints, CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
-    KeyUsagePurpose, SerialNumber,
+    BasicConstraints, CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa,
+    Issuer, KeyPair, KeyUsagePurpose, SerialNumber,
 };
 use rustls::crypto::CryptoProvider;
 use rustls::pki_types::pem::PemObject;
@@ -34,7 +34,9 @@ pub struct CertAuthority {
 
 impl fmt::Debug for CertAuthority {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("CertAuthority").field("ca_path", &self.ca_path).finish_non_exhaustive()
+        f.debug_struct("CertAuthority")
+            .field("ca_path", &self.ca_path)
+            .finish_non_exhaustive()
     }
 }
 
@@ -52,7 +54,8 @@ impl CertAuthority {
         let key_path = dir.join(CA_KEY_FILE);
 
         let (ca_pem, key) = if cert_path.exists() && key_path.exists() {
-            let key = KeyPair::from_pem(&fs::read_to_string(&key_path)?).context("reading CA key")?;
+            let key =
+                KeyPair::from_pem(&fs::read_to_string(&key_path)?).context("reading CA key")?;
             (fs::read_to_string(&cert_path)?, key)
         } else {
             let key = KeyPair::generate().context("generating CA key")?;
@@ -61,10 +64,17 @@ impl CertAuthority {
             let mut dn = DistinguishedName::new();
             dn.push(DnType::CommonName, format!("Relay Local CA ({host})"));
             dn.push(DnType::OrganizationName, "Relay");
-            dn.push(DnType::OrganizationalUnitName, "Generated locally - never share the key");
+            dn.push(
+                DnType::OrganizationalUnitName,
+                "Generated locally - never share the key",
+            );
             params.distinguished_name = dn;
             params.is_ca = IsCa::Ca(BasicConstraints::Constrained(0));
-            params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign, KeyUsagePurpose::DigitalSignature];
+            params.key_usages = vec![
+                KeyUsagePurpose::KeyCertSign,
+                KeyUsagePurpose::CrlSign,
+                KeyUsagePurpose::DigitalSignature,
+            ];
             let now = OffsetDateTime::now_utc();
             params.not_before = now - Duration::days(1);
             params.not_after = now + Duration::days(3650);
@@ -115,15 +125,27 @@ impl CertAuthority {
         params.not_before = now - Duration::days(1);
         params.not_after = now + Duration::days(365);
         params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
-        params.key_usages = vec![KeyUsagePurpose::DigitalSignature, KeyUsagePurpose::KeyEncipherment];
+        params.key_usages = vec![
+            KeyUsagePurpose::DigitalSignature,
+            KeyUsagePurpose::KeyEncipherment,
+        ];
         params.use_authority_key_identifier_extension = true;
         params.serial_number = Some(random_serial());
 
         let key = KeyPair::generate().context("generating leaf key")?;
-        let cert = params.signed_by(&key, &self.issuer).context("signing leaf")?;
+        let cert = params
+            .signed_by(&key, &self.issuer)
+            .context("signing leaf")?;
         let key_der = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key.serialize_der()));
-        let signing_key = self.provider.key_provider.load_private_key(key_der).context("loading leaf key")?;
-        let certified = Arc::new(CertifiedKey::new(vec![cert.der().clone(), self.ca_der.clone()], signing_key));
+        let signing_key = self
+            .provider
+            .key_provider
+            .load_private_key(key_der)
+            .context("loading leaf key")?;
+        let certified = Arc::new(CertifiedKey::new(
+            vec![cert.der().clone(), self.ca_der.clone()],
+            signing_key,
+        ));
         self.cache.lock().unwrap().put(host, certified.clone());
         Ok(certified)
     }
@@ -138,7 +160,10 @@ pub struct SniResolver {
 
 impl ResolvesServerCert for SniResolver {
     fn resolve(&self, hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
-        let host = hello.server_name().unwrap_or(&self.fallback_host).to_owned();
+        let host = hello
+            .server_name()
+            .unwrap_or(&self.fallback_host)
+            .to_owned();
         match self.ca.leaf_for(&host) {
             Ok(k) => Some(k),
             Err(e) => {
@@ -188,7 +213,10 @@ mod tests {
         assert_eq!(a.ca_der(), b.ca_der());
         let leaf = a.leaf_for("API.AcmeShop.com.").unwrap();
         assert_eq!(leaf.cert.len(), 2, "leaf + CA chain");
-        assert!(Arc::ptr_eq(&leaf, &a.leaf_for("api.acmeshop.com").unwrap()), "cached by normalized host");
+        assert!(
+            Arc::ptr_eq(&leaf, &a.leaf_for("api.acmeshop.com").unwrap()),
+            "cached by normalized host"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 }

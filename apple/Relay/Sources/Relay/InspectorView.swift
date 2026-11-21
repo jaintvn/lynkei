@@ -35,6 +35,11 @@ struct InspectorView: View {
                             size: isRequest ? tx.requestBodySize : tx.responseBodySize
                         )
                     }
+                    if !tx.websocketMessages.isEmpty {
+                        section("WebSocket · \(tx.websocketMessages.count) messages") {
+                            WebSocketView(messages: tx.websocketMessages)
+                        }
+                    }
                 }
                 .padding(18)
             }
@@ -163,5 +168,33 @@ struct BodyView: View {
               let out = try? JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
         else { return nil }
         return String(data: out, encoding: .utf8)
+    }
+}
+
+/// Frames of an upgraded WebSocket connection: direction, type, size, text preview.
+struct WebSocketView: View {
+    let messages: [FfiWsMessage]
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(Array(messages.prefix(300).enumerated()), id: \.offset) { _, m in
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: m.sent ? "arrow.up" : "arrow.down")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(m.sent ? Theme.accent : Theme.s2xx)
+                        .frame(width: 12)
+                    Text(m.kind).font(Theme.monoSmall).foregroundStyle(Theme.muted).frame(width: 64, alignment: .leading)
+                    Text(m.preview ?? "\(formatBytes(m.size))")
+                        .font(.system(size: 11.5, design: .monospaced))
+                        .lineLimit(3)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Text("\(m.atMs) ms").font(.system(size: 10.5, design: .monospaced)).foregroundStyle(Theme.faint)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .overlay(alignment: .bottom) { Rectangle().fill(Theme.line).frame(height: 1) }
+            }
+        }
+        .background(RoundedRectangle(cornerRadius: 10).fill(Theme.raised))
     }
 }

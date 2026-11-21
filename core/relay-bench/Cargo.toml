@@ -1,0 +1,20 @@
+[package]
+name = "relay-bench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = "1.0.104"
+bytes = "1.12.2"
+futures-core = "0.3.34"
+http = "1.5.0"
+http-body-util = "0.1.5"
+hyper = { version = "1.12.0", features = ["http1", "server", "client"] }
+hyper-util = { version = "0.1.21", features = ["tokio"] }
+rcgen = { version = "0.14.10", features = ["pem", "ring"] }
+relay-proxy = { version = "0.1.0", path = "../relay-proxy" }
+relay-store = { version = "0.1.0", path = "../relay-store" }
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std"] }
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "net", "io-util", "time"] }
+tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring"] }

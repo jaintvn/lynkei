@@ -23,33 +23,47 @@ pub struct FetchResult {
 }
 
 /// GETs `url` through the proxy at `proxy`. HTTPS is verified against `roots` only.
-pub async fn fetch_via_proxy(proxy: SocketAddr, url: &str, roots: &[CertificateDer<'static>]) -> Result<FetchResult> {
+pub async fn fetch_via_proxy(
+    proxy: SocketAddr,
+    url: &str,
+    roots: &[CertificateDer<'static>],
+) -> Result<FetchResult> {
     let uri: Uri = url.parse().context("parsing URL")?;
     let host = uri.host().context("URL needs a host")?.to_owned();
     let https = uri.scheme_str() == Some("https");
     let port = uri.port_u16().unwrap_or(if https { 443 } else { 80 });
-    let mut stream = TcpStream::connect(proxy).await.context("connecting to proxy")?;
+    let mut stream = TcpStream::connect(proxy)
+        .await
+        .context("connecting to proxy")?;
 
     if https {
         let connect = format!("CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n\r\n");
         stream.write_all(connect.as_bytes()).await?;
         let head = read_head(&mut stream).await?;
         if !head.starts_with("HTTP/1.1 200") && !head.starts_with("HTTP/1.0 200") {
-            bail!("proxy refused CONNECT: {}", head.lines().next().unwrap_or(""));
+            bail!(
+                "proxy refused CONNECT: {}",
+                head.lines().next().unwrap_or("")
+            );
         }
         let mut store = RootCertStore::empty();
         for r in roots {
             store.add(r.clone())?;
         }
-        let cfg = ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-            .with_safe_default_protocol_versions()?
-            .with_root_certificates(store)
-            .with_no_client_auth();
+        let cfg =
+            ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+                .with_safe_default_protocol_versions()?
+                .with_root_certificates(store)
+                .with_no_client_auth();
         let tls = TlsConnector::from(Arc::new(cfg))
             .connect(ServerName::try_from(host.clone())?, stream)
             .await
             .context("TLS handshake through proxy")?;
-        let path = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/").to_owned();
+        let path = uri
+            .path_and_query()
+            .map(|p| p.as_str())
+            .unwrap_or("/")
+            .to_owned();
         send(tls, &host, port, &path).await
     } else {
         // Plain HTTP: absolute-form request to the proxy.
@@ -59,13 +73,22 @@ pub async fn fetch_via_proxy(proxy: SocketAddr, url: &str, roots: &[CertificateD
 
 /// GETs `url` directly (no proxy). HTTPS is verified against `roots`, or the public web PKI if `None`.
 /// Used to test VPN capture: the VPN, not a proxy setting, is what routes this through Relay.
-pub async fn fetch_direct(url: &str, roots: Option<&[CertificateDer<'static>]>) -> Result<FetchResult> {
+pub async fn fetch_direct(
+    url: &str,
+    roots: Option<&[CertificateDer<'static>]>,
+) -> Result<FetchResult> {
     let uri: Uri = url.parse().context("parsing URL")?;
     let host = uri.host().context("URL needs a host")?.to_owned();
     let https = uri.scheme_str() == Some("https");
     let port = uri.port_u16().unwrap_or(if https { 443 } else { 80 });
-    let stream = TcpStream::connect((host.as_str(), port)).await.context("connecting")?;
-    let path = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/").to_owned();
+    let stream = TcpStream::connect((host.as_str(), port))
+        .await
+        .context("connecting")?;
+    let path = uri
+        .path_and_query()
+        .map(|p| p.as_str())
+        .unwrap_or("/")
+        .to_owned();
     if !https {
         return send(stream, &host, port, &path).await;
     }
@@ -78,10 +101,11 @@ pub async fn fetch_direct(url: &str, roots: Option<&[CertificateDer<'static>]>) 
         }
         None => store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned()),
     }
-    let cfg = ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-        .with_safe_default_protocol_versions()?
-        .with_root_certificates(store)
-        .with_no_client_auth();
+    let cfg =
+        ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()?
+            .with_root_certificates(store)
+            .with_no_client_auth();
     let tls = TlsConnector::from(Arc::new(cfg))
         .connect(ServerName::try_from(host.clone())?, stream)
         .await
@@ -97,7 +121,11 @@ where
     tokio::spawn(async move {
         let _ = conn.await;
     });
-    let host_header = if port == 443 || port == 80 { host.to_owned() } else { format!("{host}:{port}") };
+    let host_header = if port == 443 || port == 80 {
+        host.to_owned()
+    } else {
+        format!("{host}:{port}")
+    };
     let req = Request::get(target)
         .header("host", host_header)
         .header("user-agent", "relay-cli/0.1")
@@ -108,10 +136,19 @@ where
     let headers = resp
         .headers()
         .iter()
-        .map(|(k, v)| (k.to_string(), String::from_utf8_lossy(v.as_bytes()).into_owned()))
+        .map(|(k, v)| {
+            (
+                k.to_string(),
+                String::from_utf8_lossy(v.as_bytes()).into_owned(),
+            )
+        })
         .collect();
     let body = resp.into_body().collect().await?.to_bytes();
-    Ok(FetchResult { status, headers, body })
+    Ok(FetchResult {
+        status,
+        headers,
+        body,
+    })
 }
 
 async fn read_head(stream: &mut TcpStream) -> Result<String> {

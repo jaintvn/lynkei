@@ -17,7 +17,9 @@ pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 pub type ProxyBody = BoxBody<Bytes, BoxError>;
 
 pub fn full(bytes: impl Into<Bytes>) -> ProxyBody {
-    Full::new(bytes.into()).map_err(|never| match never {}).boxed()
+    Full::new(bytes.into())
+        .map_err(|never| match never {})
+        .boxed()
 }
 
 /// What a finished (or interrupted) body looked like.
@@ -47,7 +49,17 @@ pub struct TeeBody<B> {
 impl<B> TeeBody<B> {
     pub fn new(inner: B, limit: usize) -> (Self, oneshot::Receiver<TeeOutcome>) {
         let (tx, rx) = oneshot::channel();
-        (Self { inner, buf: BytesMut::new(), limit, total: 0, expected: None, done: Some(tx) }, rx)
+        (
+            Self {
+                inner,
+                buf: BytesMut::new(),
+                limit,
+                total: 0,
+                expected: None,
+                done: Some(tx),
+            },
+            rx,
+        )
     }
 
     /// Declares the body length (from `Content-Length`), so reaching it counts as complete.
@@ -77,7 +89,10 @@ where
     type Data = Bytes;
     type Error = BoxError;
 
-    fn poll_frame(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Result<Frame<Bytes>, BoxError>>> {
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Bytes>, BoxError>>> {
         match Pin::new(&mut self.inner).poll_frame(cx) {
             Poll::Ready(Some(Ok(frame))) => {
                 if let Some(data) = frame.data_ref() {
@@ -136,7 +151,11 @@ mod tests {
     use http_body_util::StreamBody;
 
     fn chunks(parts: Vec<&'static [u8]>) -> ProxyBody {
-        let stream = futures_lite_iter(parts.into_iter().map(|p| Ok::<_, BoxError>(Frame::data(Bytes::from_static(p)))));
+        let stream = futures_lite_iter(
+            parts
+                .into_iter()
+                .map(|p| Ok::<_, BoxError>(Frame::data(Bytes::from_static(p)))),
+        );
         StreamBody::new(stream).boxed()
     }
 
@@ -156,9 +175,16 @@ mod tests {
     async fn forwards_everything_and_caps_the_capture() {
         let (tee, rx) = TeeBody::new(chunks(vec![b"hello ", b"streaming ", b"world"]), 8);
         let out = tee.collect().await.unwrap().to_bytes();
-        assert_eq!(&out[..], b"hello streaming world", "client receives every byte");
+        assert_eq!(
+            &out[..],
+            b"hello streaming world",
+            "client receives every byte"
+        );
         let o = rx.await.unwrap();
-        assert_eq!((&o.captured[..], o.total, o.truncated, o.error), (&b"hello st"[..], 21, true, None));
+        assert_eq!(
+            (&o.captured[..], o.total, o.truncated, o.error),
+            (&b"hello st"[..], 21, true, None)
+        );
     }
 
     #[tokio::test]
@@ -167,7 +193,10 @@ mod tests {
         let (tee, rx) = TeeBody::new(chunks(vec![b"part one", b"part two"]), 1024);
         let mut tee = tee.with_expected_len(Some(16));
         for _ in 0..2 {
-            std::future::poll_fn(|cx| Pin::new(&mut tee).poll_frame(cx)).await.unwrap().unwrap();
+            std::future::poll_fn(|cx| Pin::new(&mut tee).poll_frame(cx))
+                .await
+                .unwrap()
+                .unwrap();
         }
         drop(tee);
         let o = rx.await.unwrap();

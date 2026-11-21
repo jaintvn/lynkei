@@ -1,27 +1,41 @@
 # Relay
 
-An open-source, Charles-class HTTP(S) debugging proxy for iOS and Android developers. A shared Rust engine (`core/`) is used by a SwiftUI Mac app now and a Kotlin Android app later. See [PLAN.md](PLAN.md) for the full plan and the [UI design canvas](https://claude.ai/artifact/8Av8hoMna1fDGx5AWLe5SE).
+An open-source, Charles-class HTTP(S) debugging proxy for iOS and Android developers. A shared Rust engine (`core/`) is used by a SwiftUI Mac app and a Kotlin Android app (on-device capture through a VPN). See [PLAN.md](PLAN.md) for the full plan and the [UI design canvas](https://claude.ai/artifact/8Av8hoMna1fDGx5AWLe5SE).
 
-**Status: P0 spike.** HTTP/1.1, CONNECT and TLS interception work end to end on macOS and Android.
+**Status: P1 complete.** Every feature below is in place and has been checked on macOS and on Android emulators (12, 15 and 17):
+
+- HTTP/1.1, HTTP/2 and h2c, decrypted HTTPS and WebSockets.
+- Streaming capture.
+- Searchable history.
+- A rules format.
+- A daemon with a control API and CLI.
+- Crash-safe system proxy.
 
 ## Layout
 
 ```
 core/                 Rust workspace (no platform code)
-  relay-model/        Transaction data model
-  relay-proxy/        Proxy engine: listener, TLS MITM, local CA, capture
-  relay-ffi/          UniFFI boundary → Swift (and Kotlin later)
-  relay-cli/          `relay` command-line tool (also runs on Android)
+  relay-model/        Data model, search language (filter.rs), rules format (rules.rs)
+  relay-proxy/        Proxy engine: listener, TLS MITM, HTTP/1.1 + HTTP/2, WebSocket, streaming capture
+  relay-netstack/     VPN packets → TCP/UDP streams (Android); uses vendor/ipstack (patched)
+  relay-store/        SQLite + FTS5 traffic history
+  relay-control/      Control API (JSON-RPC over a Unix socket), engine, system proxy + guard
+  relayd/             The engine daemon
+  relay-ffi/          UniFFI boundary → Swift and Kotlin
+  relay-cli/          `relay` command-line tool
+  relay-bench/        Benchmarks against local origins
+  vendor/ipstack/     ipstack 1.0.1 with a close-handling fix (see VENDORED.md)
 apple/RelayKit/       Swift package wrapping the generated bindings + XCFramework
-apple/Relay/          SwiftUI Mac app (P0)
-scripts/              build-apple.sh, make-mac-app.sh
-design/               Shared UI brief
+apple/Relay/          SwiftUI Mac app
+android/relay-android Kotlin app: VpnService capture, foreground service
+shared/rules-schema/  JSON Schema + example for the rules YAML
+scripts/              build-apple.sh, make-mac-app.sh, build-android.sh, test-android.sh
 ```
 
 ## Prerequisites
 
 - Xcode 16+ (Swift 6), Rust via rustup (`brew install rustup && rustup default stable`)
-- Android: Android SDK + NDK, `cargo install cargo-ndk`, `rustup target add aarch64-linux-android`
+- Android: SDK + NDK, `cargo install cargo-ndk`, `rustup target add aarch64-linux-android`
 
 Homebrew's rustup is keg-only, so put it on your PATH:
 
@@ -29,35 +43,82 @@ Homebrew's rustup is keg-only, so put it on your PATH:
 export PATH="/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin:$PATH"
 ```
 
-## Build and run
+## Run the daemon and CLI
 
 ```bash
-cd core && cargo test                  # unit + offline end-to-end TLS tests
-cargo run -p relay-cli -- serve        # proxy on 127.0.0.1:8888, prints each request
+cd core && cargo build --release -p relayd -p relay-cli
 ```
-
-Mac app:
 
 ```bash
-scripts/build-apple.sh                 # Rust → XCFramework + Swift bindings
-scripts/make-mac-app.sh                # → apple/Relay/build/Relay.app
-open apple/Relay/build/Relay.app
+./target/release/relayd          # proxy on 127.0.0.1:8888 + control API
 ```
 
-Try it:
+In another terminal:
 
 ```bash
-curl --proxy http://127.0.0.1:8888 --cacert "$HOME/Library/Application Support/Relay/relay-ca.pem" https://httpbin.org/json
+./target/release/relay status
 ```
 
-- **iOS Simulator:** in the app, choose **Simulators → Trust Relay CA**, then set this Mac's HTTP and HTTPS proxy to `127.0.0.1:8888`. A privileged helper will do this automatically in P1.
-- **Android emulator or USB device** (no Wi-Fi needed): run `adb reverse tcp:8888 tcp:8888`. Then point the device's proxy at `127.0.0.1:8888` with `adb shell settings put global http_proxy 127.0.0.1:8888`, and undo it afterwards with `adb shell settings put global http_proxy :0`.
-- **Engine on Android:**
+```bash
+./target/release/relay search status:5xx host:api.acmeshop.com 'duration:>800ms'
+```
 
-  ```bash
-  ANDROID_NDK_HOME=… cargo ndk -t arm64-v8a --platform 26 build -p relay-cli --release
-  ```
+```bash
+./target/release/relay tail -state:tunneled          # live events
+```
 
-  Then `adb push` the binary and run `relay serve` on the device.
+```bash
+./target/release/relay rules check ../shared/rules-schema/example.rules.yaml
+```
 
-Any device can download the CA by opening `http://relay.ca` while it uses the proxy.
+```bash
+./target/release/relay system-proxy on       # points this Mac at Relay; restored on exit or crash
+```
+
+`relayd launch-agent --write` installs a launchd agent that keeps it running.
+
+### Search language
+
+```
+status:5xx  status:>=400  method:POST  host:acmeshop.com  path:/v2/*  duration:>800ms  size:>1MB
+body:"out of stock"  header:x-app-version=3.4  state:failed|tunneled|open  decrypted:true  version:h2
+```
+
+Bare words match the URL, headers and bodies. Put `-` in front of a term to negate it, and quote values that contain spaces.
+
+## Mac app
+
+```bash
+scripts/build-apple.sh && scripts/make-mac-app.sh && open apple/Relay/build/Relay.app
+```
+
+- **iOS Simulator:** choose **Simulators → Trust Relay CA**, then run `relay system-proxy on`.
+- **Android emulator or USB device:** run `adb reverse tcp:8888 tcp:8888`, then `adb shell settings put global http_proxy 127.0.0.1:8888`.
+
+## Android app (on-device capture)
+
+```bash
+scripts/build-android.sh && (cd android/relay-android && ./gradlew assembleDebug)
+```
+
+Install the APK, enter the package to capture, and tap **Start capture**. Capture runs as a foreground service with a notification that has a Stop action.
+
+## Tests and benchmarks
+
+```bash
+cd core && cargo test --workspace
+```
+
+```bash
+scripts/test-android.sh
+```
+
+This runs the core suites on a connected arm64 emulator.
+
+```bash
+cd core && cargo run -p relay-bench --release -- --store
+```
+
+This measures added latency, request rate and throughput.
+
+CI (`.github/workflows/ci.yml`) runs fmt, clippy, tests, the Apple build and the Android build.

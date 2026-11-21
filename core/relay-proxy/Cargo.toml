@@ -29,5 +29,7 @@ webpki-roots = "1.0.12"
 
 [dev-dependencies]
 futures-core = "0.3.34"
+futures-util = "0.3.34"
 http = "1.5.0"
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "net", "io-util"] }
+tokio-tungstenite = "0.30.0"

@@ -45,6 +45,12 @@ class MainActivity : Activity() {
     }
 
     private fun requestStart() {
+        // Android 13+: the capture notification needs permission to be shown.
+        if (android.os.Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) {
+            requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), REQ_NOTIFY)
+        }
         val consent = VpnService.prepare(this)
         if (consent != null) startActivityForResult(consent, REQ_VPN) else startVpn()
     }
@@ -147,5 +153,6 @@ class MainActivity : Activity() {
 
     companion object {
         private const val REQ_VPN = 1
+        private const val REQ_NOTIFY = 2
     }
 }

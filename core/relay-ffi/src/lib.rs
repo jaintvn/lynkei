@@ -17,7 +17,9 @@ pub enum RelayError {
 
 impl From<anyhow::Error> for RelayError {
     fn from(e: anyhow::Error) -> Self {
-        RelayError::Failed { reason: format!("{e:#}") }
+        RelayError::Failed {
+            reason: format!("{e:#}"),
+        }
     }
 }
 
@@ -59,11 +61,19 @@ pub struct FfiTransaction {
     pub request_body_preview: Option<String>,
     pub response_body_preview: Option<String>,
     pub client_addr: String,
+    pub websocket_messages: Vec<FfiWsMessage>,
 }
 
 impl From<Transaction> for FfiTransaction {
     fn from(t: Transaction) -> Self {
-        let headers = |v: Vec<relay_proxy::Header>| v.into_iter().map(|h| FfiHeader { name: h.name, value: h.value }).collect();
+        let headers = |v: Vec<relay_proxy::Header>| {
+            v.into_iter()
+                .map(|h| FfiHeader {
+                    name: h.name,
+                    value: h.value,
+                })
+                .collect()
+        };
         FfiTransaction {
             url: t.url(),
             id: t.id,
@@ -91,8 +101,30 @@ impl From<Transaction> for FfiTransaction {
             request_body_preview: t.request_body_preview,
             response_body_preview: t.response_body_preview,
             client_addr: t.client_addr,
+            websocket_messages: t
+                .websocket_messages
+                .into_iter()
+                .map(|m| FfiWsMessage {
+                    sent: m.direction == relay_proxy::WsDirection::Send,
+                    kind: format!("{:?}", m.kind).to_lowercase(),
+                    size: m.size,
+                    preview: m.preview,
+                    at_ms: m.at_ms,
+                })
+                .collect(),
         }
     }
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiWsMessage {
+    /// true = app → server.
+    pub sent: bool,
+    /// "text", "binary", "close", "ping", "pong", "continuation" or "other".
+    pub kind: String,
+    pub size: u64,
+    pub preview: Option<String>,
+    pub at_ms: u64,
 }
 
 /// Implemented by the app (Swift/Kotlin). Called on engine threads: hop to the UI thread yourself.
@@ -122,6 +154,7 @@ pub struct RelayEngine {
     data_dir: PathBuf,
     handle: Mutex<Option<ProxyHandle>>,
     vpn: Mutex<Option<relay_netstack::VpnCapture>>,
+    store: Mutex<Option<Arc<relay_store::Store>>>,
 }
 
 #[uniffi::export]
@@ -134,8 +167,16 @@ impl RelayEngine {
             .thread_name("relay-engine")
             .enable_all()
             .build()
-            .map_err(|e| RelayError::Failed { reason: e.to_string() })?;
-        Ok(Arc::new(Self { runtime, data_dir: data_dir.into(), handle: Mutex::new(None), vpn: Mutex::new(None) }))
+            .map_err(|e| RelayError::Failed {
+                reason: e.to_string(),
+            })?;
+        Ok(Arc::new(Self {
+            runtime,
+            data_dir: data_dir.into(),
+            handle: Mutex::new(None),
+            vpn: Mutex::new(None),
+            store: Mutex::new(None),
+        }))
     }
 
     /// Starts capturing from a VPN/TUN file descriptor (Android `VpnService`). Takes ownership of
@@ -143,13 +184,27 @@ impl RelayEngine {
     pub fn start_vpn(&self, tun_fd: i32, mtu: u16, block_quic: bool) -> Result<(), RelayError> {
         let handler = match self.handle.lock().unwrap().as_ref() {
             Some(h) => h.transparent(),
-            None => return Err(RelayError::Failed { reason: "start the engine before the VPN".into() }),
+            None => {
+                return Err(RelayError::Failed {
+                    reason: "start the engine before the VPN".into(),
+                });
+            }
         };
         let _rt = self.runtime.enter();
         // SAFETY: the caller hands us exclusive ownership of an open TUN descriptor.
-        let dev = unsafe { relay_netstack::TunFd::from_raw(tun_fd) }
-            .map_err(|e| RelayError::Failed { reason: format!("TUN fd: {e}") })?;
-        let capture = relay_netstack::start(dev, relay_netstack::NetstackOptions { mtu, block_quic, ..Default::default() }, handler)?;
+        let dev =
+            unsafe { relay_netstack::TunFd::from_raw(tun_fd) }.map_err(|e| RelayError::Failed {
+                reason: format!("TUN fd: {e}"),
+            })?;
+        let capture = relay_netstack::start(
+            dev,
+            relay_netstack::NetstackOptions {
+                mtu,
+                block_quic,
+                ..Default::default()
+            },
+            handler,
+        )?;
         *self.vpn.lock().unwrap() = Some(capture);
         Ok(())
     }
@@ -158,6 +213,43 @@ impl RelayEngine {
         if let Some(v) = self.vpn.lock().unwrap().take() {
             v.stop();
         }
+    }
+
+    /// Searches the stored history with the filter language (`status:5xx host:api.acme.com …`), newest first.
+    pub fn search(&self, query: String, limit: u32) -> Result<Vec<FfiTransaction>, RelayError> {
+        let filter =
+            relay_model::filter::Filter::parse(&query).map_err(|e| RelayError::Failed {
+                reason: e.to_string(),
+            })?;
+        let store = self
+            .store
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| RelayError::Failed {
+                reason: "start the engine first".into(),
+            })?;
+        Ok(store
+            .search(&filter, limit as usize)?
+            .into_iter()
+            .map(|s| s.tx.into())
+            .collect())
+    }
+
+    /// Checks a filter without running it; returns the error message, or `None` when valid.
+    pub fn validate_filter(&self, query: String) -> Option<String> {
+        relay_model::filter::Filter::parse(&query)
+            .err()
+            .map(|e| e.to_string())
+    }
+
+    pub fn stored_count(&self) -> u64 {
+        self.store
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|s| s.count().ok())
+            .unwrap_or(0)
     }
 
     pub fn vpn_stats(&self) -> Option<VpnStats> {
@@ -170,16 +262,41 @@ impl RelayEngine {
     }
 
     /// Starts the proxy on `listen_ip:port` (port 0 = any free port). Returns the bound port.
-    pub fn start(&self, listen_ip: String, port: u16, listener: Box<dyn TrafficListener>) -> Result<u16, RelayError> {
+    pub fn start(
+        &self,
+        listen_ip: String,
+        port: u16,
+        listener: Box<dyn TrafficListener>,
+    ) -> Result<u16, RelayError> {
         let mut guard = self.handle.lock().unwrap();
         if let Some(h) = guard.as_ref() {
             return Ok(h.local_addr.port());
         }
         let addr = format!("{listen_ip}:{port}")
             .parse()
-            .map_err(|e| RelayError::Failed { reason: format!("bad listen address: {e}") })?;
+            .map_err(|e| RelayError::Failed {
+                reason: format!("bad listen address: {e}"),
+            })?;
         let cfg = ProxyConfig::new(addr, &self.data_dir);
-        let handle = self.runtime.block_on(relay_proxy::start(cfg, Arc::new(ListenerSink(listener))))?;
+        // Every event is persisted (searchable history) and forwarded to the app.
+        let store = relay_store::Store::open(
+            &self.data_dir.join("relay.db"),
+            relay_store::StoreConfig::default(),
+        )?;
+        let session = format!(
+            "{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0)
+        );
+        let sink = relay_store::StoreSink::new(
+            store.clone(),
+            session,
+            Some(Arc::new(ListenerSink(listener))),
+        );
+        *self.store.lock().unwrap() = Some(store);
+        let handle = self.runtime.block_on(relay_proxy::start(cfg, sink))?;
         let port = handle.local_addr.port();
         *guard = Some(handle);
         Ok(port)
@@ -209,7 +326,10 @@ impl RelayEngine {
 impl RelayEngine {
     fn ca(&self) -> Result<relay_proxy::ca::CertAuthority, RelayError> {
         let provider = Arc::new(rustls::crypto::ring::default_provider());
-        Ok(relay_proxy::ca::CertAuthority::load_or_create(&self.data_dir, provider)?)
+        Ok(relay_proxy::ca::CertAuthority::load_or_create(
+            &self.data_dir,
+            provider,
+        )?)
     }
 }
 

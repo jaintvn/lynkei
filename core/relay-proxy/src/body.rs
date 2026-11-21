@@ -44,7 +44,10 @@ pub fn body_preview(headers: &HeaderMap, body: &[u8], max_bytes: usize) -> Optio
     if body.is_empty() {
         return None;
     }
-    let content_type = headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("");
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
     if !content_type.is_empty() && !is_textual(content_type) {
         return None;
     }
@@ -59,7 +62,12 @@ pub fn body_preview(headers: &HeaderMap, body: &[u8], max_bytes: usize) -> Optio
         "gzip" | "x-gzip" => inflate(flate2::read::GzDecoder::new(body), max_bytes)?,
         "deflate" => inflate(flate2::read::ZlibDecoder::new(body), max_bytes)
             .or_else(|| inflate(flate2::read::DeflateDecoder::new(body), max_bytes))?,
-        _ => return Some(format!("[{encoding}-encoded body, {} bytes — decoding arrives in P1]", body.len())),
+        _ => {
+            return Some(format!(
+                "[{encoding}-encoded body, {} bytes — decoding arrives in P1]",
+                body.len()
+            ));
+        }
     };
     if content_type.is_empty() && std::str::from_utf8(&decoded[..decoded.len().min(512)]).is_err() {
         return None;
@@ -82,9 +90,17 @@ fn inflate(mut r: impl Read, max_bytes: usize) -> Option<Vec<u8>> {
 fn is_textual(ct: &str) -> bool {
     let ct = ct.to_ascii_lowercase();
     ct.starts_with("text/")
-        || ["json", "xml", "javascript", "x-www-form-urlencoded", "graphql", "yaml", "csv"]
-            .iter()
-            .any(|k| ct.contains(k))
+        || [
+            "json",
+            "xml",
+            "javascript",
+            "x-www-form-urlencoded",
+            "graphql",
+            "yaml",
+            "csv",
+        ]
+        .iter()
+        .any(|k| ct.contains(k))
 }
 
 #[cfg(test)]
@@ -96,7 +112,10 @@ mod tests {
     #[test]
     fn strips_hop_by_hop_and_connection_listed() {
         let mut h = HeaderMap::new();
-        h.insert("connection", HeaderValue::from_static("keep-alive, x-secret"));
+        h.insert(
+            "connection",
+            HeaderValue::from_static("keep-alive, x-secret"),
+        );
         h.insert("x-secret", HeaderValue::from_static("1"));
         h.insert("transfer-encoding", HeaderValue::from_static("chunked"));
         h.insert("content-type", HeaderValue::from_static("application/json"));
@@ -123,9 +142,15 @@ mod tests {
         enc.write_all(br#"{"ok":true}"#).unwrap();
         let gz = enc.finish().unwrap();
         let mut h = HeaderMap::new();
-        h.insert("content-type", HeaderValue::from_static("application/json; charset=utf-8"));
+        h.insert(
+            "content-type",
+            HeaderValue::from_static("application/json; charset=utf-8"),
+        );
         h.insert("content-encoding", HeaderValue::from_static("gzip"));
-        assert_eq!(body_preview(&h, &gz, 1024).as_deref(), Some(r#"{"ok":true}"#));
+        assert_eq!(
+            body_preview(&h, &gz, 1024).as_deref(),
+            Some(r#"{"ok":true}"#)
+        );
 
         let mut img = HeaderMap::new();
         img.insert("content-type", HeaderValue::from_static("image/webp"));

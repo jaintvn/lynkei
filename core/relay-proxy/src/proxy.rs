@@ -16,15 +16,14 @@ use http::{Method, Request, Response, StatusCode, Uri, Version};
 use http_body_util::BodyExt;
 use hyper::body::Incoming;
 use hyper::server::conn::{http1, http2};
-use hyper_util::server::conn::auto::Builder as AutoBuilder;
 use hyper::service::service_fn;
 use hyper_rustls::HttpsConnector;
 use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::server::conn::auto::Builder as AutoBuilder;
 use relay_model::{Header, Transaction, TransactionState};
 use rustls::crypto::CryptoProvider;
-use rustls::pki_types::CertificateDer;
 use rustls::{ClientConfig, RootCertStore, ServerConfig};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
@@ -47,6 +46,8 @@ type H2cClient = Client<HttpConnector, ProxyBody>;
 pub(crate) struct Shared {
     pub ca: Arc<CertAuthority>,
     client: UpstreamClient,
+    /// HTTP/1.1-only client for WebSocket upgrades (an upgrade can't happen over HTTP/2).
+    ws_client: UpstreamClient,
     h2c: H2cClient,
     sink: Arc<dyn EventSink>,
     next_id: AtomicU64,
@@ -76,7 +77,9 @@ impl ProxyHandle {
     /// A cloneable entry point for connections that did not come through the proxy listener
     /// (VPN / transparent capture), sharing this proxy's CA, upstream pool and event sink.
     pub fn transparent(&self) -> TransparentHandler {
-        TransparentHandler { shared: self.shared.clone() }
+        TransparentHandler {
+            shared: self.shared.clone(),
+        }
     }
 }
 
@@ -93,7 +96,9 @@ impl TransparentHandler {
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
         let shared = self.shared.clone();
-        tokio::spawn(async move { handle_tunnel(shared, stream, dst.ip().to_string(), dst.port(), src).await });
+        tokio::spawn(async move {
+            handle_tunnel(shared, stream, dst.ip().to_string(), dst.port(), src).await
+        });
     }
 }
 
@@ -105,12 +110,26 @@ impl Drop for ProxyHandle {
 
 pub async fn start(cfg: ProxyConfig, sink: Arc<dyn EventSink>) -> Result<ProxyHandle> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let ca = Arc::new(CertAuthority::load_or_create(&cfg.data_dir, provider.clone())?);
-    let client = build_upstream_client(provider, &cfg.extra_upstream_roots)?;
-    let h2c = Client::builder(TokioExecutor::new()).http2_only(true).build(HttpConnector::new());
-    let listener = TcpListener::bind(cfg.listen).await.with_context(|| format!("binding {}", cfg.listen))?;
+    let ca = Arc::new(CertAuthority::load_or_create(
+        &cfg.data_dir,
+        provider.clone(),
+    )?);
+    let client = build_upstream_client(provider.clone(), &cfg, true)?;
+    let ws_client = build_upstream_client(provider, &cfg, false)?;
+    let h2c = Client::builder(TokioExecutor::new())
+        .http2_only(true)
+        .build(http_connector(&cfg));
+    let listener = bind_with_fallback(cfg.listen, cfg.port_fallback).await?;
     let local_addr = listener.local_addr()?;
-    let shared = Arc::new(Shared { ca, client, h2c, sink, next_id: AtomicU64::new(1), cfg });
+    let shared = Arc::new(Shared {
+        ca,
+        client,
+        ws_client,
+        h2c,
+        sink,
+        next_id: AtomicU64::new(1),
+        cfg,
+    });
     let (tx, mut rx) = oneshot::channel();
 
     let accept_shared = shared.clone();
@@ -135,28 +154,70 @@ pub async fn start(cfg: ProxyConfig, sink: Arc<dyn EventSink>) -> Result<ProxyHa
     });
 
     tracing::info!(%local_addr, "proxy listening");
-    Ok(ProxyHandle { local_addr, shared, shutdown: Some(tx) })
+    Ok(ProxyHandle {
+        local_addr,
+        shared,
+        shutdown: Some(tx),
+    })
 }
 
-fn build_upstream_client(provider: Arc<CryptoProvider>, extra_roots: &[CertificateDer<'static>]) -> Result<UpstreamClient> {
+fn http_connector(cfg: &ProxyConfig) -> HttpConnector {
+    let mut http = HttpConnector::new();
+    http.enforce_http(false);
+    http.set_nodelay(true);
+    http.set_connect_timeout(Some(cfg.connect_timeout));
+    http
+}
+
+fn build_upstream_client(
+    provider: Arc<CryptoProvider>,
+    cfg: &ProxyConfig,
+    allow_h2: bool,
+) -> Result<UpstreamClient> {
     let mut roots = RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    for r in extra_roots {
+    for r in &cfg.extra_upstream_roots {
         roots.add(r.clone()).context("adding extra upstream root")?;
     }
     let tls = ClientConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()?
         .with_root_certificates(roots)
         .with_no_client_auth();
-    let https = hyper_rustls::HttpsConnectorBuilder::new()
+    let builder = hyper_rustls::HttpsConnectorBuilder::new()
         .with_tls_config(tls)
         .https_or_http()
-        .enable_http1()
-        .enable_http2()
-        .build();
+        .enable_http1();
+    let https = if allow_h2 {
+        builder.enable_http2().wrap_connector(http_connector(cfg))
+    } else {
+        builder.wrap_connector(http_connector(cfg))
+    };
     Ok(Client::builder(TokioExecutor::new())
         .pool_idle_timeout(Duration::from_secs(60))
         .build(https))
+}
+
+/// Binds `addr`; if its port is taken, tries the next `fallback` ports (port 0 = any free port).
+async fn bind_with_fallback(addr: SocketAddr, fallback: u16) -> Result<TcpListener> {
+    let mut last_err = None;
+    let tries = if addr.port() == 0 { 0 } else { fallback };
+    for offset in 0..=tries {
+        let mut a = addr;
+        a.set_port(addr.port().saturating_add(offset));
+        match TcpListener::bind(a).await {
+            Ok(l) => {
+                if offset > 0 {
+                    tracing::warn!(wanted = %addr, using = %a, "listen port busy, using the next free one");
+                }
+                return Ok(l);
+            }
+            Err(e) => last_err = Some(e),
+        }
+    }
+    Err(anyhow::anyhow!(
+        "binding {addr} (+{tries} following ports): {}",
+        last_err.map(|e| e.to_string()).unwrap_or_default()
+    ))
 }
 
 async fn serve_client(shared: Arc<Shared>, stream: TcpStream, peer: SocketAddr) {
@@ -174,7 +235,11 @@ async fn serve_client(shared: Arc<Shared>, stream: TcpStream, peer: SocketAddr) 
     }
 }
 
-async fn handle_proxy_request(shared: Arc<Shared>, peer: SocketAddr, req: Request<Incoming>) -> Response<ProxyBody> {
+async fn handle_proxy_request(
+    shared: Arc<Shared>,
+    peer: SocketAddr,
+    req: Request<Incoming>,
+) -> Response<ProxyBody> {
     if req.method() == Method::CONNECT {
         let Some(authority) = req.uri().authority().cloned() else {
             return text_response(StatusCode::BAD_REQUEST, "CONNECT needs host:port");
@@ -183,14 +248,20 @@ async fn handle_proxy_request(shared: Arc<Shared>, peer: SocketAddr, req: Reques
         let port = authority.port_u16().unwrap_or(443);
         tokio::spawn(async move {
             match hyper::upgrade::on(req).await {
-                Ok(upgraded) => handle_tunnel(shared, TokioIo::new(upgraded), host, port, peer).await,
+                Ok(upgraded) => {
+                    handle_tunnel(shared, TokioIo::new(upgraded), host, port, peer).await
+                }
                 Err(e) => tracing::debug!(error = %e, "CONNECT upgrade failed"),
             }
         });
         return Response::new(full(Bytes::new()));
     }
 
-    let host = req.uri().host().map(str::to_owned).or_else(|| host_header(req.headers()));
+    let host = req
+        .uri()
+        .host()
+        .map(str::to_owned)
+        .or_else(|| host_header(req.headers()));
     if req.uri().authority().is_none() || host.as_deref() == Some(CA_DOWNLOAD_HOST) {
         // Origin-form request aimed at the proxy itself, or the magic CA host.
         return ca_download_response(&shared);
@@ -200,8 +271,13 @@ async fn handle_proxy_request(shared: Arc<Shared>, peer: SocketAddr, req: Reques
 
 /// Handles a byte stream whose destination is `host:port` (after CONNECT, or from the VPN):
 /// decrypt TLS, decode plain HTTP, or relay raw bytes.
-async fn handle_tunnel<S>(shared: Arc<Shared>, mut client: S, host: String, port: u16, peer: SocketAddr)
-where
+async fn handle_tunnel<S>(
+    shared: Arc<Shared>,
+    mut client: S,
+    host: String,
+    port: u16,
+    peer: SocketAddr,
+) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let first = match read_first_flight(&mut client).await {
@@ -247,11 +323,20 @@ async fn read_first_flight<S: AsyncRead + Unpin>(client: &mut S) -> Option<Vec<u
 }
 
 /// Plain HTTP on a transparent connection: decode it like an absolute-form proxy request.
-async fn serve_plain_http<S>(shared: Arc<Shared>, client: S, host: String, port: u16, peer: SocketAddr)
-where
+async fn serve_plain_http<S>(
+    shared: Arc<Shared>,
+    client: S,
+    host: String,
+    port: u16,
+    peer: SocketAddr,
+) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let fallback = if port == 80 { host.clone() } else { format!("{host}:{port}") };
+    let fallback = if port == 80 {
+        host.clone()
+    } else {
+        format!("{host}:{port}")
+    };
     let svc = service_fn(move |req: Request<Incoming>| {
         let shared = shared.clone();
         let fallback = fallback.clone();
@@ -264,7 +349,10 @@ where
     // HTTP/1.1 or h2c with prior knowledge, detected from the connection preface.
     let mut builder = AutoBuilder::new(TokioExecutor::new());
     builder.http1().preserve_header_case(true);
-    if let Err(e) = builder.serve_connection(TokioIo::new(client), svc).await {
+    if let Err(e) = builder
+        .serve_connection_with_upgrades(TokioIo::new(client), svc)
+        .await
+    {
         tracing::debug!(%host, error = %e, "plain HTTP connection ended with error");
     }
 }
@@ -275,11 +363,18 @@ where
 {
     let started = Instant::now();
     let started_ms = now_ms();
-    let resolver = SniResolver { ca: shared.ca.clone(), fallback_host: host.clone() };
-    let mut server_cfg = match ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-        .with_safe_default_protocol_versions()
+    let resolver = SniResolver {
+        ca: shared.ca.clone(),
+        fallback_host: host.clone(),
+    };
+    let mut server_cfg = match ServerConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
     {
-        Ok(b) => b.with_no_client_auth().with_cert_resolver(Arc::new(resolver)),
+        Ok(b) => b
+            .with_no_client_auth()
+            .with_cert_resolver(Arc::new(resolver)),
         Err(e) => {
             tracing::error!(error = %e, "TLS config");
             return;
@@ -291,7 +386,9 @@ where
     let tls = match acceptor.accept(client).await {
         Ok(tls) => tls,
         Err(e) => {
-            let mut t = base_transaction(&shared, "CONNECT", "https", &host, port, "", peer, started_ms);
+            let mut t = base_transaction(
+                &shared, "CONNECT", "https", &host, port, "", peer, started_ms,
+            );
             t.state = TransactionState::Failed;
             t.duration_ms = started.elapsed().as_millis() as u64;
             t.error = Some(format!(
@@ -302,19 +399,36 @@ where
         }
     };
 
-    let sni = tls.get_ref().1.server_name().map(str::to_owned).unwrap_or_else(|| host.clone());
-    let authority = if port == 443 { sni.clone() } else { format!("{sni}:{port}") };
+    let sni = tls
+        .get_ref()
+        .1
+        .server_name()
+        .map(str::to_owned)
+        .unwrap_or_else(|| host.clone());
+    let authority = if port == 443 {
+        sni.clone()
+    } else {
+        format!("{sni}:{port}")
+    };
     let svc_shared = shared.clone();
     let svc = service_fn(move |req| {
         let shared = svc_shared.clone();
         let authority = authority.clone();
-        async move { Ok::<_, Infallible>(forward(&shared, req, "https", Some(authority), peer, true).await) }
+        async move {
+            Ok::<_, Infallible>(forward(&shared, req, "https", Some(authority), peer, true).await)
+        }
     });
     let h2 = tls.get_ref().1.alpn_protocol() == Some(b"h2");
     let result = if h2 {
-        http2::Builder::new(TokioExecutor::new()).serve_connection(TokioIo::new(tls), svc).await
+        http2::Builder::new(TokioExecutor::new())
+            .serve_connection(TokioIo::new(tls), svc)
+            .await
     } else {
-        http1::Builder::new().preserve_header_case(true).serve_connection(TokioIo::new(tls), svc).await
+        http1::Builder::new()
+            .preserve_header_case(true)
+            .serve_connection(TokioIo::new(tls), svc)
+            .with_upgrades()
+            .await
     };
     if let Err(e) = result {
         tracing::debug!(%host, h2, error = %e, "decrypted connection ended with error");
@@ -336,9 +450,18 @@ async fn raw_tunnel<S>(
     let started = Instant::now();
     let started_ms = now_ms();
     let scheme = if port == 80 { "http" } else { "https" };
-    let mut t = base_transaction(&shared, "CONNECT", scheme, &name, port, "", peer, started_ms);
+    let mut t = base_transaction(
+        &shared, "CONNECT", scheme, &name, port, "", peer, started_ms,
+    );
     let host = target;
-    match TcpStream::connect((host.as_str(), port)).await {
+    let connect = tokio::time::timeout(
+        shared.cfg.connect_timeout,
+        TcpStream::connect((host.as_str(), port)),
+    );
+    match connect
+        .await
+        .unwrap_or_else(|_| Err(io::Error::new(io::ErrorKind::TimedOut, "connect timed out")))
+    {
         Ok(mut upstream) => {
             let _ = upstream.set_nodelay(true);
             let mut open = t.clone();
@@ -347,7 +470,12 @@ async fn raw_tunnel<S>(
             shared.sink.on_transaction(open);
             // Count on the app's side as bytes flow: copy_bidirectional drops its totals when either
             // side resets the connection, which many servers and apps do.
-            let (read, written) = relay_tunnel(&mut client, &mut upstream, shared.cfg.tunnel_half_close_grace).await;
+            let (read, written) = relay_tunnel(
+                &mut client,
+                &mut upstream,
+                shared.cfg.tunnel_half_close_grace,
+            )
+            .await;
             t.state = TransactionState::Tunneled;
             t.request_body_size = read;
             t.response_body_size = written;
@@ -373,6 +501,9 @@ async fn forward(
     peer: SocketAddr,
     decrypted: bool,
 ) -> Response<ProxyBody> {
+    if is_websocket_upgrade(&req) {
+        return forward_upgrade(shared, req, scheme, tls_authority, peer, decrypted).await;
+    }
     let started = Instant::now();
     let started_ms = now_ms();
     let (parts, body) = req.into_parts();
@@ -381,9 +512,22 @@ async fn forward(
         .or_else(|| parts.uri.authority().map(|a| a.to_string()))
         .or_else(|| host_header(&parts.headers))
         .unwrap_or_default();
-    let path = parts.uri.path_and_query().map(|p| p.as_str().to_owned()).unwrap_or_else(|| "/".into());
+    let path = parts
+        .uri
+        .path_and_query()
+        .map(|p| p.as_str().to_owned())
+        .unwrap_or_else(|| "/".into());
     let (host, port) = split_authority(&authority, if scheme == "https" { 443 } else { 80 });
-    let mut t = base_transaction(shared, parts.method.as_str(), scheme, &host, port, &path, peer, started_ms);
+    let mut t = base_transaction(
+        shared,
+        parts.method.as_str(),
+        scheme,
+        &host,
+        port,
+        &path,
+        peer,
+        started_ms,
+    );
     t.decrypted = decrypted;
     t.http_version = version_str(parts.version).to_owned();
     t.request_headers = to_headers(&parts.headers);
@@ -394,9 +538,20 @@ async fn forward(
 
     let uri: Uri = match format!("{scheme}://{authority}{path}").parse() {
         Ok(u) => u,
-        Err(e) => return fail(shared, t, started, StatusCode::BAD_REQUEST, format!("bad target URL: {e}")),
+        Err(e) => {
+            return fail(
+                shared,
+                t,
+                started,
+                StatusCode::BAD_REQUEST,
+                format!("bad target URL: {e}"),
+            );
+        }
     };
-    let mut out = Request::builder().method(parts.method.clone()).uri(uri).version(Version::HTTP_11);
+    let mut out = Request::builder()
+        .method(parts.method.clone())
+        .uri(uri)
+        .version(Version::HTTP_11);
     let mut headers = parts.headers.clone();
     strip_hop_by_hop(&mut headers);
     headers.remove(HeaderName::from_static("proxy-authorization"));
@@ -406,7 +561,15 @@ async fn forward(
     *out.headers_mut().unwrap() = headers;
     let out = match out.body(req_tee.boxed()) {
         Ok(r) => r,
-        Err(e) => return fail(shared, t, started, StatusCode::BAD_REQUEST, format!("building request: {e}")),
+        Err(e) => {
+            return fail(
+                shared,
+                t,
+                started,
+                StatusCode::BAD_REQUEST,
+                format!("building request: {e}"),
+            );
+        }
     };
 
     // An app speaking h2c can only be matched by an h2c upstream; everything else negotiates via ALPN.
@@ -417,8 +580,24 @@ async fn forward(
     };
     let resp = match tokio::time::timeout(shared.cfg.upstream_timeout, upstream).await {
         Ok(Ok(r)) => r,
-        Ok(Err(e)) => return fail(shared, t, started, StatusCode::BAD_GATEWAY, format!("upstream error: {}", error_chain(&e))),
-        Err(_) => return fail(shared, t, started, StatusCode::GATEWAY_TIMEOUT, "upstream timed out".into()),
+        Ok(Err(e)) => {
+            return fail(
+                shared,
+                t,
+                started,
+                StatusCode::BAD_GATEWAY,
+                format!("upstream error: {}", error_chain(&e)),
+            );
+        }
+        Err(_) => {
+            return fail(
+                shared,
+                t,
+                started,
+                StatusCode::GATEWAY_TIMEOUT,
+                "upstream timed out".into(),
+            );
+        }
     };
     let (rparts, rbody) = resp.into_parts();
     t.status = Some(rparts.status.as_u16());
@@ -448,7 +627,10 @@ async fn forward(
         match resp.error {
             Some(e) => {
                 t.state = TransactionState::Failed;
-                t.error = Some(format!("response interrupted after {} bytes: {e}", resp.total));
+                t.error = Some(format!(
+                    "response interrupted after {} bytes: {e}",
+                    resp.total
+                ));
             }
             None => t.state = TransactionState::Complete,
         }
@@ -463,15 +645,255 @@ async fn forward(
     response
 }
 
+fn is_websocket_upgrade<B>(req: &Request<B>) -> bool {
+    let has_token = |name: header::HeaderName, token: &str| {
+        req.headers()
+            .get_all(name)
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .flat_map(|v| v.split(','))
+            .any(|t| t.trim().eq_ignore_ascii_case(token))
+    };
+    req.version() == Version::HTTP_11
+        && has_token(header::CONNECTION, "upgrade")
+        && has_token(header::UPGRADE, "websocket")
+}
+
+/// WebSocket: forward the upgrade over HTTP/1.1, then relay both directions and record frames.
+async fn forward_upgrade(
+    shared: &Shared,
+    mut req: Request<Incoming>,
+    scheme: &str,
+    tls_authority: Option<String>,
+    peer: SocketAddr,
+    decrypted: bool,
+) -> Response<ProxyBody> {
+    let started = Instant::now();
+    let started_ms = now_ms();
+    let authority = tls_authority
+        .or_else(|| req.uri().authority().map(|a| a.to_string()))
+        .or_else(|| host_header(req.headers()))
+        .unwrap_or_default();
+    let path = req
+        .uri()
+        .path_and_query()
+        .map(|p| p.as_str().to_owned())
+        .unwrap_or_else(|| "/".into());
+    let (host, port) = split_authority(&authority, if scheme == "https" { 443 } else { 80 });
+    let mut t = base_transaction(shared, "GET", scheme, &host, port, &path, peer, started_ms);
+    t.decrypted = decrypted;
+    t.http_version = version_str(req.version()).to_owned();
+    t.request_headers = to_headers(req.headers());
+    let client_upgrade = hyper::upgrade::on(&mut req);
+
+    let uri: Uri = match format!("{scheme}://{authority}{path}").parse() {
+        Ok(u) => u,
+        Err(e) => {
+            return fail(
+                shared,
+                t,
+                started,
+                StatusCode::BAD_REQUEST,
+                format!("bad target URL: {e}"),
+            );
+        }
+    };
+    let mut headers = req.headers().clone();
+    for name in [
+        "proxy-connection",
+        "proxy-authorization",
+        "keep-alive",
+        "te",
+        "trailer",
+        "transfer-encoding",
+    ] {
+        headers.remove(name);
+    }
+    headers.remove(header::HOST);
+    headers.insert(header::CONNECTION, HeaderValue::from_static("upgrade"));
+    let mut out = Request::builder()
+        .method(Method::GET)
+        .uri(uri)
+        .version(Version::HTTP_11);
+    *out.headers_mut().unwrap() = headers;
+    let out = match out.body(full(Bytes::new())) {
+        Ok(r) => r,
+        Err(e) => {
+            return fail(
+                shared,
+                t,
+                started,
+                StatusCode::BAD_REQUEST,
+                format!("building request: {e}"),
+            );
+        }
+    };
+    let mut resp = match tokio::time::timeout(
+        shared.cfg.upstream_timeout,
+        shared.ws_client.request(out),
+    )
+    .await
+    {
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) => {
+            return fail(
+                shared,
+                t,
+                started,
+                StatusCode::BAD_GATEWAY,
+                format!("upstream error: {}", error_chain(&e)),
+            );
+        }
+        Err(_) => {
+            return fail(
+                shared,
+                t,
+                started,
+                StatusCode::GATEWAY_TIMEOUT,
+                "upstream timed out".into(),
+            );
+        }
+    };
+    t.status = Some(resp.status().as_u16());
+    t.upstream_http_version = Some(version_str(resp.version()).to_owned());
+    t.response_headers = to_headers(resp.headers());
+
+    if resp.status() != StatusCode::SWITCHING_PROTOCOLS {
+        // The server declined the upgrade: pass its answer through as a normal response.
+        t.state = TransactionState::Complete;
+        t.duration_ms = started.elapsed().as_millis() as u64;
+        shared.sink.on_transaction(t);
+        let (rparts, rbody) = resp.into_parts();
+        let mut r = Response::new(
+            rbody
+                .map_err(|e| Box::new(e) as crate::tee::BoxError)
+                .boxed(),
+        );
+        *r.status_mut() = rparts.status;
+        *r.headers_mut() = rparts.headers;
+        return r;
+    }
+
+    let upstream_upgrade = hyper::upgrade::on(&mut resp);
+    let mut open = t.clone();
+    open.state = TransactionState::InProgress;
+    open.duration_ms = started.elapsed().as_millis() as u64;
+    shared.sink.on_transaction(open);
+
+    let sink = shared.sink.clone();
+    let grace = shared.cfg.tunnel_half_close_grace;
+    tokio::spawn(async move {
+        match (client_upgrade.await, upstream_upgrade.await) {
+            (Ok(c), Ok(u)) => {
+                let r = relay_websocket(TokioIo::new(c), TokioIo::new(u), grace).await;
+                t.request_body_size = r.sent;
+                t.response_body_size = r.received;
+                t.websocket_messages = r.messages;
+                if r.dropped > 0 {
+                    t.error = Some(format!(
+                        "{} more WebSocket messages were not kept",
+                        r.dropped
+                    ));
+                }
+                t.state = TransactionState::Complete;
+            }
+            (Err(e), _) | (_, Err(e)) => {
+                t.state = TransactionState::Failed;
+                t.error = Some(format!("WebSocket upgrade failed: {e}"));
+            }
+        }
+        t.duration_ms = started.elapsed().as_millis() as u64;
+        sink.on_transaction(t);
+    });
+
+    let mut response = Response::new(full(Bytes::new()));
+    *response.status_mut() = StatusCode::SWITCHING_PROTOCOLS;
+    *response.headers_mut() = resp.headers().clone();
+    response
+}
+
+struct WsRelayed {
+    sent: u64,
+    received: u64,
+    messages: Vec<relay_model::WsMessage>,
+    dropped: u64,
+}
+
+/// Relays an upgraded WebSocket connection, recording frames in both directions.
+async fn relay_websocket<C, U>(client: C, upstream: U, grace: Duration) -> WsRelayed
+where
+    C: AsyncRead + AsyncWrite + Unpin,
+    U: AsyncRead + AsyncWrite + Unpin,
+{
+    use relay_model::WsDirection;
+    use tokio::io::AsyncWriteExt;
+    let rec = std::sync::Mutex::new(crate::ws::WsRecorder::default());
+    let (sent, received) = (AtomicU64::new(0), AtomicU64::new(0));
+    let (mut cr, mut cw) = tokio::io::split(client);
+    let (mut ur, mut uw) = tokio::io::split(upstream);
+    {
+        let up = async {
+            let mut buf = vec![0u8; 16 * 1024];
+            while let Ok(n) = cr.read(&mut buf).await {
+                if n == 0 {
+                    break;
+                }
+                rec.lock().unwrap().feed(WsDirection::Send, &buf[..n]);
+                sent.fetch_add(n as u64, Ordering::Relaxed);
+                if uw.write_all(&buf[..n]).await.is_err() {
+                    break;
+                }
+            }
+            let _ = uw.shutdown().await;
+        };
+        let down = async {
+            let mut buf = vec![0u8; 16 * 1024];
+            while let Ok(n) = ur.read(&mut buf).await {
+                if n == 0 {
+                    break;
+                }
+                rec.lock().unwrap().feed(WsDirection::Receive, &buf[..n]);
+                received.fetch_add(n as u64, Ordering::Relaxed);
+                if cw.write_all(&buf[..n]).await.is_err() {
+                    break;
+                }
+            }
+            let _ = cw.shutdown().await;
+        };
+        tokio::pin!(up, down);
+        tokio::select! {
+            _ = &mut up => { let _ = tokio::time::timeout(grace, &mut down).await; }
+            _ = &mut down => { let _ = tokio::time::timeout(grace, &mut up).await; }
+        }
+    } // the copy futures (and their borrows of `rec`) end here
+    let rec = rec.into_inner().unwrap();
+    WsRelayed {
+        sent: sent.load(Ordering::Relaxed),
+        received: received.load(Ordering::Relaxed),
+        messages: rec.messages,
+        dropped: rec.dropped,
+    }
+}
+
 fn preview(headers: &HeaderMap, o: &TeeOutcome, max: usize) -> Option<String> {
     let mut p = body_preview(headers, &o.captured, max)?;
     if o.truncated && !p.ends_with("[truncated]") {
-        p.push_str(&format!("\n…[truncated — first {} of {} bytes captured]", o.captured.len(), o.total));
+        p.push_str(&format!(
+            "\n…[truncated — first {} of {} bytes captured]",
+            o.captured.len(),
+            o.total
+        ));
     }
     Some(p)
 }
 
-fn fail(shared: &Shared, mut t: Transaction, started: Instant, status: StatusCode, msg: String) -> Response<ProxyBody> {
+fn fail(
+    shared: &Shared,
+    mut t: Transaction,
+    started: Instant,
+    status: StatusCode,
+    msg: String,
+) -> Response<ProxyBody> {
     t.state = TransactionState::Failed;
     t.duration_ms = started.elapsed().as_millis() as u64;
     t.error = Some(msg.clone());
@@ -481,7 +903,10 @@ fn fail(shared: &Shared, mut t: Transaction, started: Instant, status: StatusCod
 
 fn ca_download_response(shared: &Shared) -> Response<ProxyBody> {
     let mut r = Response::new(full(Bytes::from(shared.ca.ca_pem().to_owned())));
-    r.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("application/x-x509-ca-cert"));
+    r.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/x-x509-ca-cert"),
+    );
     r.headers_mut().insert(
         header::CONTENT_DISPOSITION,
         HeaderValue::from_static("attachment; filename=\"relay-ca.pem\""),
@@ -492,7 +917,10 @@ fn ca_download_response(shared: &Shared) -> Response<ProxyBody> {
 fn text_response(status: StatusCode, msg: &str) -> Response<ProxyBody> {
     let mut r = Response::new(full(Bytes::from(msg.to_owned())));
     *r.status_mut() = status;
-    r.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("text/plain; charset=utf-8"));
+    r.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/plain; charset=utf-8"),
+    );
     r
 }
 
@@ -529,17 +957,23 @@ fn base_transaction(
         request_body_preview: None,
         response_body_preview: None,
         client_addr: peer.to_string(),
+        websocket_messages: vec![],
     }
 }
 
 fn to_headers(map: &HeaderMap) -> Vec<Header> {
     map.iter()
-        .map(|(k, v)| Header { name: k.as_str().to_owned(), value: String::from_utf8_lossy(v.as_bytes()).into_owned() })
+        .map(|(k, v)| Header {
+            name: k.as_str().to_owned(),
+            value: String::from_utf8_lossy(v.as_bytes()).into_owned(),
+        })
         .collect()
 }
 
 fn host_header(h: &HeaderMap) -> Option<String> {
-    h.get(header::HOST).and_then(|v| v.to_str().ok()).map(str::to_owned)
+    h.get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned)
 }
 
 fn split_authority(authority: &str, default_port: u16) -> (String, u16) {
@@ -550,7 +984,12 @@ fn split_authority(authority: &str, default_port: u16) -> (String, u16) {
 }
 
 fn content_length(h: &HeaderMap) -> Option<u64> {
-    h.get(header::CONTENT_LENGTH)?.to_str().ok()?.trim().parse().ok()
+    h.get(header::CONTENT_LENGTH)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
 }
 
 fn version_str(v: Version) -> &'static str {
@@ -565,7 +1004,10 @@ fn version_str(v: Version) -> &'static str {
 }
 
 fn now_ms() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 fn error_chain(e: &dyn std::error::Error) -> String {
@@ -606,7 +1048,10 @@ where
         _ = &mut up => { let _ = tokio::time::timeout(grace, &mut down).await; }
         _ = &mut down => { let _ = tokio::time::timeout(grace, &mut up).await; }
     }
-    (read.load(Ordering::Relaxed), written.load(Ordering::Relaxed))
+    (
+        read.load(Ordering::Relaxed),
+        written.load(Ordering::Relaxed),
+    )
 }
 
 /// Counts bytes read from (app → server) and written to (server → app) the wrapped stream.
@@ -618,23 +1063,36 @@ struct Counted<S> {
 
 impl<S> Counted<S> {
     fn new(inner: S) -> Self {
-        Self { inner, read: Arc::default(), written: Arc::default() }
+        Self {
+            inner,
+            read: Arc::default(),
+            written: Arc::default(),
+        }
     }
 }
 
 impl<S: AsyncRead + Unpin> AsyncRead for Counted<S> {
-    fn poll_read(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
         let before = buf.filled().len();
         let r = Pin::new(&mut self.inner).poll_read(cx, buf);
         if let Poll::Ready(Ok(())) = r {
-            self.read.fetch_add((buf.filled().len() - before) as u64, Ordering::Relaxed);
+            self.read
+                .fetch_add((buf.filled().len() - before) as u64, Ordering::Relaxed);
         }
         r
     }
 }
 
 impl<S: AsyncWrite + Unpin> AsyncWrite for Counted<S> {
-    fn poll_write(mut self: Pin<&mut Self>, cx: &mut Context<'_>, data: &[u8]) -> Poll<io::Result<usize>> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        data: &[u8],
+    ) -> Poll<io::Result<usize>> {
         let r = Pin::new(&mut self.inner).poll_write(cx, data);
         if let Poll::Ready(Ok(n)) = r {
             self.written.fetch_add(n as u64, Ordering::Relaxed);
@@ -662,7 +1120,11 @@ impl<S> Prefixed<S> {
 }
 
 impl<S: AsyncRead + Unpin> AsyncRead for Prefixed<S> {
-    fn poll_read(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
         if !self.prefix.is_empty() {
             let n = self.prefix.len().min(buf.remaining());
             let chunk = self.prefix.split_to(n);
@@ -674,7 +1136,11 @@ impl<S: AsyncRead + Unpin> AsyncRead for Prefixed<S> {
 }
 
 impl<S: AsyncWrite + Unpin> AsyncWrite for Prefixed<S> {
-    fn poll_write(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
         Pin::new(&mut self.inner).poll_write(cx, buf)
     }
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {

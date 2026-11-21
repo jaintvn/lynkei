@@ -24,19 +24,34 @@ impl TunFd {
         }
         let owned = unsafe { OwnedFd::from_raw_fd(raw) };
         // SAFETY: we own `owned` exclusively; it stays open for as long as the AsyncFd lives.
-        let fd = unsafe { AsyncFd::register(owned) }.map_err(|e| io::Error::other(e.to_string()))?;
+        let fd =
+            unsafe { AsyncFd::register(owned) }.map_err(|e| io::Error::other(e.to_string()))?;
         Ok(Self { fd })
     }
 }
 
 impl AsyncRead for TunFd {
-    fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
         loop {
             let mut guard = ready!(self.fd.poll_read_ready(cx))?;
             let unfilled = buf.initialize_unfilled();
             match guard.try_io(|inner| {
-                let n = unsafe { libc::read(inner.as_raw_fd(), unfilled.as_mut_ptr().cast(), unfilled.len()) };
-                if n < 0 { Err(io::Error::last_os_error()) } else { Ok(n as usize) }
+                let n = unsafe {
+                    libc::read(
+                        inner.as_raw_fd(),
+                        unfilled.as_mut_ptr().cast(),
+                        unfilled.len(),
+                    )
+                };
+                if n < 0 {
+                    Err(io::Error::last_os_error())
+                } else {
+                    Ok(n as usize)
+                }
             }) {
                 Ok(Ok(n)) => {
                     buf.advance(n);
@@ -50,12 +65,20 @@ impl AsyncRead for TunFd {
 }
 
 impl AsyncWrite for TunFd {
-    fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, data: &[u8]) -> Poll<io::Result<usize>> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        data: &[u8],
+    ) -> Poll<io::Result<usize>> {
         loop {
             let mut guard = ready!(self.fd.poll_write_ready(cx))?;
             match guard.try_io(|inner| {
                 let n = unsafe { libc::write(inner.as_raw_fd(), data.as_ptr().cast(), data.len()) };
-                if n < 0 { Err(io::Error::last_os_error()) } else { Ok(n as usize) }
+                if n < 0 {
+                    Err(io::Error::last_os_error())
+                } else {
+                    Ok(n as usize)
+                }
             }) {
                 Ok(r) => return Poll::Ready(r),
                 Err(_would_block) => continue,

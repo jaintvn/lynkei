@@ -65,7 +65,14 @@ pub fn looks_like_http(buf: &[u8]) -> bool {
         return true;
     }
     const METHODS: &[&[u8]] = &[
-        b"GET ", b"POST ", b"PUT ", b"HEAD ", b"DELETE ", b"PATCH ", b"OPTIONS ", b"TRACE ",
+        b"GET ",
+        b"POST ",
+        b"PUT ",
+        b"HEAD ",
+        b"DELETE ",
+        b"PATCH ",
+        b"OPTIONS ",
+        b"TRACE ",
     ];
     METHODS.iter().any(|m| buf.starts_with(m))
 }
@@ -91,7 +98,8 @@ impl<'a> Reader<'a> {
         self.take(2).map(|b| u16::from_be_bytes([b[0], b[1]]))
     }
     fn u24(&mut self) -> Option<u32> {
-        self.take(3).map(|b| u32::from_be_bytes([0, b[0], b[1], b[2]]))
+        self.take(3)
+            .map(|b| u32::from_be_bytes([0, b[0], b[1], b[2]]))
     }
 }
 
@@ -137,7 +145,10 @@ mod tests {
         assert!(!looks_like_http(b"\x16\x03\x01\x02\x00"));
         assert!(!looks_like_http(b"SSH-2.0-OpenSSH"));
         assert!(looks_like_http(H2_PREFACE), "h2c prior knowledge");
-        assert!(looks_like_http(b"PRI * HTTP/2.0\r\n"), "partial preface in the first read");
+        assert!(
+            looks_like_http(b"PRI * HTTP/2.0\r\n"),
+            "partial preface in the first read"
+        );
         assert!(!looks_like_http(b"PRI"), "too short to tell");
     }
 }

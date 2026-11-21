@@ -1,0 +1,217 @@
+//! The control API end to end: real engine, real socket server, real client, local origin.
+
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+
+use relay_control::sysproxy::{FileBackend, SystemProxyBackend};
+use relay_control::{Client, Engine, EngineOptions};
+use serde_json::{Value, json};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
+
+fn temp(name: &str) -> PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .subsec_nanos();
+    let d = std::env::temp_dir().join(format!("rc-{name}-{}-{nanos}", std::process::id()));
+    std::fs::create_dir_all(&d).unwrap();
+    d
+}
+
+/// A tiny HTTP/1.1 origin: answers every request with `hello from <path>`.
+async fn origin() -> u16 {
+    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = l.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        loop {
+            let (mut s, _) = l.accept().await.unwrap();
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 4096];
+                let mut got = Vec::new();
+                while !got.windows(4).any(|w| w == b"\r\n\r\n") {
+                    let n = s.read(&mut buf).await.unwrap_or(0);
+                    if n == 0 {
+                        return;
+                    }
+                    got.extend_from_slice(&buf[..n]);
+                }
+                let line = String::from_utf8_lossy(&got)
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .to_string();
+                let path = line.split_whitespace().nth(1).unwrap_or("/").to_string();
+                let body = format!("hello from {path}");
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = s.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+    port
+}
+
+async fn setup(name: &str) -> (Arc<Engine>, Client, u16, PathBuf, Arc<FileBackend>) {
+    let dir = temp(name);
+    let backend = Arc::new(FileBackend {
+        path: dir.join("fake-system.json"),
+    });
+    let mut opts = EngineOptions::new(&dir);
+    opts.system_proxy = Some(backend.clone());
+    let engine = Engine::new(opts).unwrap();
+    let port = engine
+        .start_proxy("127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
+    let socket = dir.join("c.sock");
+    let listener = relay_control::server::bind(&socket).unwrap();
+    tokio::spawn(relay_control::server::serve(listener, engine.clone()));
+    let client = Client::connect(&socket).await.unwrap();
+    (engine, client, port, dir, backend)
+}
+
+async fn get(proxy: u16, url: &str) {
+    let r = relay_proxy::client::fetch_via_proxy(
+        format!("127.0.0.1:{proxy}").parse().unwrap(),
+        url,
+        &[],
+    )
+    .await
+    .unwrap();
+    assert_eq!(r.status, 200);
+}
+
+#[tokio::test]
+async fn hello_search_get_and_clear() {
+    let (_engine, mut c, proxy, _dir, _) = setup("search").await;
+    let hello = c.call("hello", Value::Null).await.unwrap();
+    assert_eq!(hello["api"], "relay.control/1");
+    assert_eq!(hello["proxy"]["port"], proxy);
+
+    let o = origin().await;
+    get(proxy, &format!("http://127.0.0.1:{o}/v2/products?page=2")).await;
+    get(proxy, &format!("http://127.0.0.1:{o}/v2/checkout")).await;
+
+    let rows = c
+        .call("traffic.search", json!({"query": "path:/v2/checkout"}))
+        .await
+        .unwrap();
+    assert_eq!(rows.as_array().unwrap().len(), 1);
+    assert_eq!(
+        rows[0]["transaction"]["response_body_preview"],
+        "hello from /v2/checkout"
+    );
+    let all = c
+        .call("traffic.search", json!({"query": "", "limit": 10}))
+        .await
+        .unwrap();
+    assert_eq!(all.as_array().unwrap().len(), 2);
+    assert_eq!(
+        all[0]["transaction"]["path"], "/v2/checkout",
+        "newest first"
+    );
+
+    let key = rows[0]["key"].as_i64().unwrap();
+    let one = c.call("traffic.get", json!({"key": key})).await.unwrap();
+    assert_eq!(one["transaction"]["method"], "GET");
+
+    c.call("traffic.clear", Value::Null).await.unwrap();
+    assert!(
+        c.call("traffic.search", json!({}))
+            .await
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn subscribers_get_live_events_matching_their_filter() {
+    let (_engine, mut c, proxy, _dir, _) = setup("subscribe").await;
+    c.call("traffic.subscribe", json!({"query": "path:/wanted"}))
+        .await
+        .unwrap();
+    let o = origin().await;
+    get(proxy, &format!("http://127.0.0.1:{o}/ignored")).await;
+    get(proxy, &format!("http://127.0.0.1:{o}/wanted")).await;
+    let t = tokio::time::timeout(Duration::from_secs(3), c.next_event())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(t.path, "/wanted", "non-matching traffic is not pushed");
+}
+
+#[tokio::test]
+async fn rules_are_validated_before_they_are_saved() {
+    let (_engine, mut c, _proxy, dir, _) = setup("rules").await;
+    let bad = c
+        .call(
+            "rules.set",
+            json!({"yaml": "version: 1\nrules:\n  - id: x\n    kind: block\n    match: {}\n"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(bad["saved"], false);
+    assert!(
+        bad["problems"][0]
+            .as_str()
+            .unwrap()
+            .contains("`match` is empty")
+    );
+    assert!(
+        !dir.join("rules.yaml").exists(),
+        "invalid rules are never written"
+    );
+
+    let good = "version: 1\nrules:\n  - id: no-ads\n    kind: block\n    match: { host: \"*.doubleclick.net\" }\n";
+    let ok = c.call("rules.set", json!({"yaml": good})).await.unwrap();
+    assert_eq!(ok["saved"], true);
+    assert_eq!(
+        std::fs::read_to_string(dir.join("rules.yaml")).unwrap(),
+        good
+    );
+    let back = c.call("rules.get", Value::Null).await.unwrap();
+    assert!(back["yaml"].as_str().unwrap().contains("doubleclick"));
+}
+
+#[tokio::test]
+async fn system_proxy_through_the_api_and_clear_errors() {
+    let (_engine, mut c, proxy, _dir, backend) = setup("sysproxy").await;
+    let on = c.call("system_proxy.enable", Value::Null).await.unwrap();
+    assert_eq!(
+        (on["enabled"].as_bool(), on["port"].as_u64()),
+        (Some(true), Some(proxy as u64))
+    );
+    assert_eq!(backend.read("x").unwrap().secure.port, proxy);
+    let off = c.call("system_proxy.disable", Value::Null).await.unwrap();
+    assert_eq!(off["enabled"], false);
+    assert!(!backend.read("x").unwrap().secure.enabled);
+
+    let e = c
+        .call("nope.nothing", Value::Null)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("unknown method") && e.contains("-32601"), "{e}");
+    let e = c
+        .call("traffic.search", json!({"query": "stauts:500"}))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("unknown filter") && e.contains("-32602"), "{e}");
+}
+
+#[tokio::test]
+async fn only_one_daemon_per_socket() {
+    let (_engine, _c, _proxy, dir, _) = setup("single").await;
+    let err = relay_control::server::bind(&dir.join("c.sock"))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("already running"), "{err}");
+}

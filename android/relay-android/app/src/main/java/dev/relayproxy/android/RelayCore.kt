@@ -22,6 +22,10 @@ object RelayCore {
     private val lines = ArrayDeque<String>()
     @Volatile var onUpdate: (() -> Unit)? = null
 
+    /** Finished transactions and failures (failed or 5xx) since capture started. */
+    val completed = java.util.concurrent.atomic.AtomicLong()
+    val errors = java.util.concurrent.atomic.AtomicLong()
+
     @Synchronized
     fun engine(context: Context): RelayEngine {
         engine?.let { return it }
@@ -49,7 +53,13 @@ object RelayCore {
     }
 
     private object Listener : TrafficListener {
-        override fun onTransaction(transaction: FfiTransaction) = log(format(transaction))
+        override fun onTransaction(transaction: FfiTransaction) {
+            if (transaction.state != FfiState.IN_PROGRESS) {
+                completed.incrementAndGet()
+                if (transaction.state == FfiState.FAILED || (transaction.status?.toInt() ?: 0) >= 500) errors.incrementAndGet()
+            }
+            log(format(transaction))
+        }
     }
 
     private fun format(t: FfiTransaction): String {

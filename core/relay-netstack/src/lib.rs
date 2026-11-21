@@ -59,7 +59,11 @@ pub struct NetstackOptions {
 
 impl Default for NetstackOptions {
     fn default() -> Self {
-        Self { mtu: 1500, block_quic: true, max_write: 16 * 1024 }
+        Self {
+            mtu: 1500,
+            block_quic: true,
+            max_write: 16 * 1024,
+        }
     }
 }
 
@@ -91,13 +95,23 @@ impl<S: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for CappedWrites<S>
         cx: &mut std::task::Context<'_>,
         data: &[u8],
     ) -> std::task::Poll<io::Result<usize>> {
-        let n = if self.max == 0 { data.len() } else { data.len().min(self.max) };
+        let n = if self.max == 0 {
+            data.len()
+        } else {
+            data.len().min(self.max)
+        };
         std::pin::Pin::new(&mut self.inner).poll_write(cx, &data[..n])
     }
-    fn poll_flush(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<io::Result<()>> {
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
         std::pin::Pin::new(&mut self.inner).poll_flush(cx)
     }
-    fn poll_shutdown(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<io::Result<()>> {
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
         std::pin::Pin::new(&mut self.inner).poll_shutdown(cx)
     }
 }
@@ -150,7 +164,11 @@ where
 
 /// Relays one UDP flow (DNS, NTP, …) through a normal socket owned by the Relay process.
 async fn relay_udp(mut flow: ipstack::IpStackUdpStream, dst: SocketAddr) -> io::Result<()> {
-    let bind: SocketAddr = if dst.is_ipv4() { "0.0.0.0:0".parse().unwrap() } else { "[::]:0".parse().unwrap() };
+    let bind: SocketAddr = if dst.is_ipv4() {
+        "0.0.0.0:0".parse().unwrap()
+    } else {
+        "[::]:0".parse().unwrap()
+    };
     let sock = UdpSocket::bind(bind).await?;
     sock.connect(dst).await?;
     let mut from_app = vec![0u8; 65535];

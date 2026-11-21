@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1.0.104"
+relay-control = { version = "0.1.0", path = "../relay-control" }
 relay-model = { version = "0.1.0", path = "../relay-model" }
 relay-proxy = { version = "0.1.0", path = "../relay-proxy" }
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std"] }

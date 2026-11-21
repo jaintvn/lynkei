@@ -1,0 +1,13 @@
+[package]
+name = "relay-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = "1.0.104"
+relay-model = { version = "0.1.0", path = "../relay-model" }
+relay-proxy = { version = "0.1.0", path = "../relay-proxy" }
+rusqlite = { version = "0.43.0", features = ["bundled"] }
+serde_json = "1.0.154"
+tracing = "0.1.44"

@@ -1,0 +1,17 @@
+[package]
+name = "relayd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = "1.0.104"
+relay-control = { version = "0.1.0", path = "../relay-control" }
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "signal"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+[dev-dependencies]
+relay-control = { path = "../relay-control" }
+serde_json = "1.0.154"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "time"] }

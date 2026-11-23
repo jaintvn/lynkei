@@ -8,7 +8,7 @@ struct ConnectView: View {
     @Environment(TrafficStore.self) private var traffic
     @Environment(\.dismiss) private var dismiss
     @State private var devices: DeviceStore?
-    @State private var usbPhones: [String] = []
+    @State private var usbPhones: [PhysicalPhone] = []
 
     var body: some View {
         VStack(spacing: 0) {
@@ -24,7 +24,7 @@ struct ConnectView: View {
                         ForEach(NetworkClient.detect(from: traffic.transactions)) { client in
                             NetworkClientCard(client: client)
                         }
-                        if !usbPhones.isEmpty { UsbIPhoneCard(names: usbPhones) }
+                        if !usbPhones.isEmpty { UsbIPhoneCard(phones: usbPhones, setupURL: devices.iphoneSetupURL) }
                         WifiCard(url: devices.iphoneSetupURL, altURL: devices.wifiURL, trafficSeen: false)
                         AndroidWifiCard(url: devices.androidWifiURL)
                     }
@@ -53,7 +53,7 @@ struct ConnectView: View {
             // Look for cabled iPhones while the sheet is open.
             while !Task.isCancelled {
                 usbPhones = await Task.detached { UsbIPhones.detect() }.value
-                try? await Task.sleep(for: .seconds(5))
+                try? await Task.sleep(for: .seconds(8))
             }
         }
         .onDisappear { devices?.stopWatching() }

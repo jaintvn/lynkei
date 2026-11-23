@@ -70,7 +70,7 @@ impl ProxyConfig {
             listen,
             data_dir: data_dir.into(),
             passthrough_hosts: default_passthrough(),
-            max_preview_bytes: 256 * 1024,
+            max_preview_bytes: 4 * 1024 * 1024,
             upstream_timeout: Duration::from_secs(60),
             connect_timeout: Duration::from_secs(10),
             port_fallback: 10,

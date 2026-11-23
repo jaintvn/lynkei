@@ -32,6 +32,7 @@ struct StepDraft: Identifiable, Equatable {
         case "set_json": return "Set JSON field"
         case "remove_json": return "Remove JSON field"
         case "replace_body": return "Replace text"
+        case "set_body": return "Replace whole body"
         default: return "Delay (ms)"
         }
     }
@@ -100,6 +101,8 @@ struct RewriteDraft: Identifiable {
     var requestFields: [JSONLeaf] = []
     var responseFields: [JSONLeaf] = []
     var isNew: Bool { sides.allSatisfy { $0.ruleId.isEmpty } }
+    /// Which tab the editor opens on.
+    var startTab = 0
 
     /// A new rewrite for this call: its method, host and path are filled in, and its headers and
     /// JSON fields can be picked from the Add menu.
@@ -134,8 +137,13 @@ struct RewriteView: View {
     @Environment(TrafficStore.self) private var store
     @Environment(\.dismiss) private var dismiss
     @State var draft: RewriteDraft
-    @State private var tab = 0
+    @State private var tab: Int
     @State private var error: String?
+
+    init(draft: RewriteDraft) {
+        _draft = State(initialValue: draft)
+        _tab = State(initialValue: draft.startTab)
+    }
 
     private var side: Int { min(tab, draft.sides.count - 1) }
 
@@ -244,6 +252,7 @@ struct RewriteView: View {
                 Button("Other field…") { add(StepDraft(kind: "remove_json")) }
             }
             Button("Replace text in the body…") { add(StepDraft(kind: "replace_body")) }
+            Button("Replace the whole body…") { add(StepDraft(kind: "set_body")) }
             if phase != "request" {
                 Divider()
                 Button("Change status code…") { var s = StepDraft(kind: "set_status"); s.value = "200"; add(s) }
@@ -312,6 +321,11 @@ private struct StepRow: View {
                 TextField("value (text, number, true, null…)", text: $step.value)
             case "remove_json":
                 TextField("$.path.to.field", text: $step.path)
+            case "set_body":
+                TextEditor(text: $step.value)
+                    .font(Theme.mono).scrollContentBackground(.hidden).padding(4)
+                    .frame(height: 110)
+                    .background(RoundedRectangle(cornerRadius: 6).fill(Theme.panel))
             case "replace_body":
                 TextField("Find", text: $step.find)
                 Image(systemName: "arrow.right").foregroundStyle(Theme.muted)

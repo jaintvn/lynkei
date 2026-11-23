@@ -32,10 +32,7 @@ struct InspectorView: View {
                         HeadersView(headers: isRequest ? tx.requestHeaders : tx.responseHeaders)
                     }
                     section("Body") {
-                        BodyView(
-                            preview: isRequest ? tx.requestBodyPreview : tx.responseBodyPreview,
-                            size: isRequest ? tx.requestBodySize : tx.responseBodySize
-                        )
+                        BodyView(tx: tx, isRequest: isRequest)
                     }
                     if !tx.websocketMessages.isEmpty {
                         section("WebSocket · \(tx.websocketMessages.count) messages") {
@@ -142,34 +139,6 @@ struct HeadersView: View {
             }
         }
         .background(RoundedRectangle(cornerRadius: 10).fill(Theme.raised))
-    }
-}
-
-struct BodyView: View {
-    let preview: String?
-    let size: UInt64
-    var body: some View {
-        Group {
-            if let preview {
-                Text(prettyJSON(preview) ?? preview)
-                    .font(.system(size: 12, design: .monospaced))
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            } else {
-                Text(size == 0 ? "Empty" : "\(formatBytes(size)) binary or not captured")
-                    .foregroundStyle(Theme.faint)
-            }
-        }
-        .padding(12)
-        .background(RoundedRectangle(cornerRadius: 10).fill(Theme.raised))
-    }
-
-    private func prettyJSON(_ s: String) -> String? {
-        guard let data = s.data(using: .utf8),
-              let obj = try? JSONSerialization.jsonObject(with: data),
-              let out = try? JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
-        else { return nil }
-        return String(data: out, encoding: .utf8)
     }
 }
 

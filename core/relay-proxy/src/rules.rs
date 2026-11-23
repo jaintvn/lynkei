@@ -287,6 +287,7 @@ pub fn has_body_edit(edits: &[(&str, &RewriteAction)]) -> bool {
             RewriteAction::SetJson { .. }
                 | RewriteAction::RemoveJson { .. }
                 | RewriteAction::ReplaceBody { .. }
+                | RewriteAction::SetBody(_)
         )
     })
 }
@@ -346,12 +347,18 @@ pub fn rewrite_body(
     if !has_body_edit(edits) {
         return body;
     }
-    let Some(plain) = decode_body(headers, &body, MAX_REWRITE_BODY) else {
+    let sets_body = edits
+        .iter()
+        .any(|(_, a)| matches!(a, RewriteAction::SetBody(_)));
+    // Replacing the whole body works even when the original is binary or too large to decode.
+    let Some(plain) = decode_body(headers, &body, MAX_REWRITE_BODY).or(sets_body.then(Vec::new))
+    else {
         return body;
     };
     let mut text = plain;
     for (_, a) in edits {
         match a {
+            RewriteAction::SetBody(new) => text = new.clone().into_bytes(),
             RewriteAction::SetJson { path, value } => {
                 if let Some(out) = edit_json(&text, |v| set_path(v, path, value.clone())) {
                     text = out;
@@ -531,6 +538,21 @@ mod tests {
 
     fn edits(a: &[RewriteAction]) -> Vec<(&'static str, &RewriteAction)> {
         a.iter().map(|x| ("r", x)).collect()
+    }
+
+    #[test]
+    fn set_body_replaces_everything_even_a_binary_original() {
+        let edits = [("r", &RewriteAction::SetBody("{\"ok\":true}".into()))];
+        let mut h = HeaderMap::new();
+        h.insert(header::CONTENT_TYPE, HeaderValue::from_static("image/png"));
+        h.insert(header::CONTENT_LENGTH, HeaderValue::from_static("4"));
+        let out = rewrite_body(
+            &edits,
+            &mut h,
+            Bytes::from_static(&[0x89, 0x50, 0xff, 0x00]),
+        );
+        assert_eq!(&out[..], b"{\"ok\":true}");
+        assert_eq!(h.get(header::CONTENT_LENGTH).unwrap(), "11");
     }
 
     #[test]

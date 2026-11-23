@@ -439,6 +439,10 @@ fn step_from(a: &relay_model::rules::RewriteAction) -> FfiRewriteStep {
             value: ms.to_string(),
             ..blank("delay")
         },
+        SetBody(text) => FfiRewriteStep {
+            value: text.clone(),
+            ..blank("set_body")
+        },
     }
 }
 
@@ -474,6 +478,7 @@ fn step_to(s: &FfiRewriteStep) -> Result<relay_model::rules::RewriteAction, Stri
             regex: s.regex,
         },
         "delay" => DelayMs(num("delay")?),
+        "set_body" => SetBody(s.value.clone()),
         other => return Err(format!("unknown edit `{other}`")),
     })
 }
@@ -499,6 +504,7 @@ fn rule_detail(a: &relay_model::rules::RuleAction) -> String {
                 "set_json" => format!("set {} = {}", s.path, s.value),
                 "remove_json" => format!("remove {}", s.path),
                 "replace_body" => format!("replace “{}” with “{}”", s.find, s.replace),
+                "set_body" => format!("replace the whole body ({} chars)", s.value.chars().count()),
                 _ => format!("delay {} ms", s.value),
             }
         })

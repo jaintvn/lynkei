@@ -165,6 +165,8 @@ pub enum RewriteAction {
     },
     /// Delay the response by this many milliseconds.
     DelayMs(u64),
+    /// Replace the whole body with this text.
+    SetBody(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]

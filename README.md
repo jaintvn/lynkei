@@ -135,13 +135,21 @@ A small black pill hugs the notch (a floating pill at top-centre on Macs without
 
 From a terminal or script (with `relayd` running): `relay decrypt on|off` and `relay throttle 3g|edge|lte|lte-lossy|high-latency|offline|off` (no argument shows the current setting). Over the control API they are `settings.get` and `settings.set {decrypt?, throttle?}`; a bad value changes nothing, and the settings survive a proxy restart but reset when `relayd` exits.
 
+## Reading and editing a whole body
+
+The body in the inspector shows the entire text (pretty-printed when it is JSON, up to 4 MB per body, with a note if a body was longer). **Search & edit…** opens it in a large window:
+
+- **Text** view: the whole body with search (type to highlight every match, Return or the arrows to jump between them, ⌘F also works), **Edit** to change it by hand, **Format** to tidy the JSON.
+- **Fields** view (JSON): every field as a row with its path and an editable value, plus a filter box. Edit values one by one; strings stay strings, numbers and `true`/`null` are read as such.
+- **Keep as a rewrite rule…** turns your changes into a Rewrite rule: one *Set JSON field* (or *Remove JSON field*) per field you changed, or a single *Replace whole body* if the body is not JSON. You can then review it, switch it on and off, and edit it any time from Rules.
+
 ## Rewrite rules (change a call's request or response)
 
 Like Charles' Rewrite, but point-and-click. Right-click any call and choose **Rewrite this call…**. The sheet is filled in with that call's method, host and path. Use **Add change** to pick what to change:
 
 - **Set header** or **Remove header**: pick from the call's own headers (or add a new one) and edit the value.
 - **Edit JSON field** or **Remove JSON field**: pick a field from the call's JSON body (shown with its current value), then type the new value (text, a number, `true`, `null`…).
-- **Replace text in the body** (plain or regex), **Change status code** and **Delay the response**.
+- **Replace text in the body** (plain or regex), **Replace the whole body**, **Change status code** and **Delay the response**.
 
 Changes are grouped under **Request** and **Response** tabs. **Save rule** applies it straight away to live traffic. In **Rules** (toolbar) every rewrite shows what it does, has an on/off switch, and **Edit…** reopens the same sheet to change values or add and remove changes; **New rewrite…** starts one from scratch. Underneath it is the same `rules.yaml` as before, so it also works from the CLI and API.
 

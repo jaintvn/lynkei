@@ -569,8 +569,8 @@ async fn large_bodies_are_forwarded_whole_but_captured_partially() {
     );
     let p = t.response_body_preview.unwrap();
     assert!(
-        p.len() < 300 * 1024,
-        "capture is bounded, not the whole 5 MB"
+        p.len() <= 4 * 1024 * 1024 + 200 && p.len() < BIG,
+        "capture is bounded at 4 MB, not the whole 5 MB"
     );
     assert!(p.contains("truncated"), "preview says it is partial");
 }

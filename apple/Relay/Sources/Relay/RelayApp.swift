@@ -4,7 +4,14 @@ import SwiftUI
 @main
 struct RelayApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-    @State private var store = TrafficStore()
+    @State private var store: TrafficStore
+    @State private var island: IslandController
+
+    init() {
+        let s = TrafficStore()
+        _store = State(initialValue: s)
+        _island = State(initialValue: IslandController(store: s))
+    }
 
     var body: some Scene {
         WindowGroup("Relay") {
@@ -12,10 +19,16 @@ struct RelayApp: App {
                 .environment(store)
                 .frame(minWidth: 1100, minHeight: 680)
                 .preferredColorScheme(.dark)
-                .onAppear { store.start() }
+                .onAppear {
+                    store.start()
+                    island.start()
+                }
                 .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in store.shutdown() }
         }
         .windowStyle(.hiddenTitleBar)
+        MenuBarExtra("Relay", systemImage: "arrow.triangle.swap") {
+            RelayMenuBar(island: island, store: store)
+        }
     }
 }
 

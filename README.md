@@ -129,6 +129,10 @@ scripts/build-apple.sh && scripts/make-mac-app.sh && open apple/Relay/build/Rela
 
 Click **Connect device**. Relay finds booted iOS Simulators and Android emulators or USB phones and sets each one up (proxy and certificate) with one click. For an iPhone on Wi-Fi, scan the QR code on that screen. From a terminal, `relay devices connect <id>` does the same.
 
+## The notch island
+
+A small black pill hugs the notch (a floating pill at top-centre on Macs without one). Beside the notch it shows a pulse with the request rate, how many calls are held at a breakpoint, and a red badge for new failures. Hover or click it to expand: the latest five calls (click one to open it in the main window), Start/Stop, and a switch for each kind of rule you have (all rules of that kind on or off together). When a breakpoint holds a request or response, the island opens on its own with **Continue**, **Edit…** and **Abort**. The menu bar icon chooses *Always*, *Only during activity* or *Off*. If another app already draws in the notch, switch the island to Off or the two will overlap.
+
 ## Compose and Repeat
 
 **Compose** (toolbar) sends a request you write; **Repeat** and **Edit & Repeat…** in a request's right-click menu resend a captured one, optionally edited. You can send it up to 200 times, one by one or all at once, which is handy for retry and race checks. The requests go through Relay, so they show up in the list and your rules and breakpoints apply to them. Only the text of a captured body is copied, so a binary or very large body needs to be pasted in.

@@ -415,3 +415,84 @@ async fn breakpoints_are_listed_edited_resumed_and_aborted_through_the_api() {
         .unwrap();
     assert_eq!(none, json!([]));
 }
+
+#[tokio::test]
+async fn decrypt_and_throttle_switches_work_through_the_api() {
+    let (engine, mut c, proxy, _dir, _) = setup("switches").await;
+    let origin = origin().await;
+    let url = format!("http://127.0.0.1:{origin}/x");
+
+    let s = c.call("settings.get", Value::Null).await.unwrap();
+    assert_eq!(s["decrypt"], true);
+    assert_eq!(s["throttle"], Value::Null);
+    assert!(
+        s["throttle_presets"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("lte"))
+    );
+
+    // A bad value changes nothing at all.
+    assert!(
+        c.call(
+            "settings.set",
+            json!({"decrypt": false, "throttle": "warp"})
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        c.call("settings.get", Value::Null).await.unwrap()["decrypt"],
+        true
+    );
+    assert!(
+        c.call("settings.set", json!({"decrypt": "yes"}))
+            .await
+            .is_err()
+    );
+
+    let t0 = std::time::Instant::now();
+    get(proxy, &url).await;
+    let baseline = t0.elapsed();
+
+    let s = c
+        .call(
+            "settings.set",
+            json!({"decrypt": false, "throttle": "high-latency"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        (s["decrypt"].clone(), s["throttle"].clone()),
+        (json!(false), json!("high-latency"))
+    );
+    let t0 = std::time::Instant::now();
+    get(proxy, &url).await;
+    assert!(t0.elapsed() >= baseline + Duration::from_millis(600));
+
+    // Survives a proxy restart.
+    c.call("proxy.stop", Value::Null).await.unwrap();
+    let port = engine
+        .start_proxy("127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
+    let t0 = std::time::Instant::now();
+    get(port, &url).await;
+    assert!(
+        t0.elapsed() >= Duration::from_millis(700),
+        "the throttle is still on"
+    );
+
+    // Partial updates leave the other switch alone; null turns the throttle off.
+    let s = c
+        .call("settings.set", json!({"throttle": null}))
+        .await
+        .unwrap();
+    assert_eq!(
+        (s["decrypt"].clone(), s["throttle"].clone()),
+        (json!(false), Value::Null)
+    );
+    let t0 = std::time::Instant::now();
+    get(port, &url).await;
+    assert!(t0.elapsed() < Duration::from_millis(600));
+}

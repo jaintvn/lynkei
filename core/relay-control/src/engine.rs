@@ -54,9 +54,17 @@ pub struct Engine {
     events: broadcast::Sender<Transaction>,
     proxy: Mutex<Option<ProxyHandle>>,
     rules: std::sync::Mutex<RuleSet>,
+    /// Live switches, kept across proxy restarts: HTTPS decryption and a network preset for everything.
+    switches: std::sync::Mutex<Switches>,
     system_proxy: Option<Arc<SystemProxy>>,
     devices: Arc<relay_devices::DeviceManager>,
     devices_runner: Arc<dyn relay_devices::Runner>,
+}
+
+#[derive(Clone)]
+struct Switches {
+    decrypt: bool,
+    throttle: Option<String>,
 }
 
 struct Broadcast(broadcast::Sender<Transaction>);
@@ -115,6 +123,10 @@ impl Engine {
             events,
             proxy: Mutex::new(None),
             rules: std::sync::Mutex::new(rules),
+            switches: std::sync::Mutex::new(Switches {
+                decrypt: true,
+                throttle: None,
+            }),
             system_proxy,
             devices,
             devices_runner,
@@ -147,6 +159,9 @@ impl Engine {
         cfg.extra_upstream_roots = self.opts.extra_upstream_roots.clone();
         let handle = relay_proxy::start(cfg, self.sink.clone()).await?;
         handle.set_rules(self.rules.lock().unwrap().clone(), &self.opts.data_dir);
+        let sw = self.switches.lock().unwrap().clone();
+        handle.set_decrypt(sw.decrypt);
+        let _ = handle.set_global_throttle(sw.throttle);
         let port = handle.local_addr.port();
         *guard = Some(handle);
         Ok(port)
@@ -274,6 +289,54 @@ impl Engine {
                 }
                 *self.rules.lock().unwrap() = set;
                 Ok(json!({ "saved": true, "problems": [] }))
+            }
+            "settings.get" => Ok(self.settings_json()),
+            "settings.set" => {
+                // Validate everything first so a bad value changes nothing.
+                let decrypt = match params.get("decrypt") {
+                    None | Some(Value::Null) => None,
+                    Some(v) => Some(
+                        v.as_bool()
+                            .ok_or_else(|| bad("`decrypt` is true or false"))?,
+                    ),
+                };
+                let throttle = match params.get("throttle") {
+                    None => None,
+                    Some(Value::Null) => Some(None),
+                    Some(v) => {
+                        let p = v
+                            .as_str()
+                            .ok_or_else(|| bad("`throttle` is a preset name or null"))?;
+                        if matches!(p, "" | "off" | "none") {
+                            Some(None)
+                        } else if relay_model::rules::THROTTLE_PRESETS.contains(&p) {
+                            Some(Some(p.to_owned()))
+                        } else {
+                            return Err(bad(&format!(
+                                "unknown throttle preset `{p}` (use one of {}, or null to turn it off)",
+                                relay_model::rules::THROTTLE_PRESETS.join(", ")
+                            )));
+                        }
+                    }
+                };
+                {
+                    let mut sw = self.switches.lock().unwrap();
+                    if let Some(d) = decrypt {
+                        sw.decrypt = d;
+                    }
+                    if let Some(t) = throttle.clone() {
+                        sw.throttle = t;
+                    }
+                }
+                if let Some(h) = self.proxy.lock().await.as_ref() {
+                    if let Some(d) = decrypt {
+                        h.set_decrypt(d);
+                    }
+                    if let Some(t) = throttle {
+                        h.set_global_throttle(t).map_err(|m| bad(&m))?;
+                    }
+                }
+                Ok(self.settings_json())
             }
             "breakpoints.list" => Ok(json!(self.paused_json().await)),
             "breakpoints.wait" => {
@@ -526,5 +589,16 @@ impl Engine {
                 })
             })
             .collect()
+    }
+}
+
+impl Engine {
+    fn settings_json(&self) -> Value {
+        let sw = self.switches.lock().unwrap().clone();
+        json!({
+            "decrypt": sw.decrypt,
+            "throttle": sw.throttle,
+            "throttle_presets": relay_model::rules::THROTTLE_PRESETS,
+        })
     }
 }

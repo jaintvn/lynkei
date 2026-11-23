@@ -14,6 +14,8 @@
 //! | `traffic.subscribe` | `{query?}` | `{}`, then `traffic.event` notifications `{transaction}` |
 //! | `rules.get` | – | `{yaml, problems}` |
 //! | `rules.set` | `{yaml}` | `{saved, problems}` (saved only when valid) |
+//! | `settings.get` | – | `{decrypt, throttle, throttle_presets}` |
+//! | `settings.set` | `{decrypt?, throttle?}` | the new settings. `decrypt` false tunnels HTTPS untouched; `throttle` is a preset name (slows every request no rule throttles) or null/"off". Kept across proxy restarts, reset when relayd exits |
 //! | `breakpoints.list` | – | held messages `[{tx_id, phase, rule, method, url, status, headers, body, body_is_text, body_size}]` |
 //! | `breakpoints.wait` | `{timeout_ms?}` | like `list`, but waits (max 120 s) until something is held |
 //! | `breakpoints.resume` | `{tx_id, phase?, edit?}` | `{done}`; `edit` = `{status?, headers?, set_headers?, remove_headers?, body?}`, anything left out stays as held |

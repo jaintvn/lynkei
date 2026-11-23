@@ -106,8 +106,8 @@ async fn main() -> Result<()> {
         "serve" => serve(&args, data_dir).await,
         "fetch" => fetch(&args, data_dir).await,
         "get" => get(&args).await,
-        "status" | "search" | "tail" | "rules" | "breakpoints" | "proxy" | "system-proxy"
-        | "devices" => control(&args, &data_dir).await,
+        "status" | "search" | "tail" | "rules" | "breakpoints" | "decrypt" | "throttle"
+        | "proxy" | "system-proxy" | "devices" => control(&args, &data_dir).await,
         "ca" => {
             let provider = Arc::new(rustls::crypto::ring::default_provider());
             let ca = relay_proxy::ca::CertAuthority::load_or_create(&data_dir, provider)?;
@@ -116,7 +116,7 @@ async fn main() -> Result<()> {
         }
         _ => {
             eprintln!(
-                "usage (with relayd running):\n  relay status\n  relay search [filter…] [--limit 50] [--json]   e.g. relay search status:5xx host:api.acme.com\n  relay tail [filter…]\n  relay rules check <file> | push <file> | pull\n  relay breakpoints [list] | wait [--timeout 30] | show <id> | resume <id> [--status N] [--header \"Name: value\"]… [--remove-header Name]… [--body TEXT | --body-file FILE] | abort <id>   (add --phase request|response when both are held)\n  relay proxy start [--port 8888] | stop\n  relay system-proxy on | off | status\n  relay devices [list] | connect <id> | disconnect <id>\n\nstandalone:\n  relay serve [--port 8888] [--listen 127.0.0.1] [--json]\n  relay get <url> [--ca FILE]\n  relay fetch <url> [--proxy 127.0.0.1:8888]\n  relay ca\n\ncommon: --data-dir DIR, --socket PATH"
+                "usage (with relayd running):\n  relay status\n  relay search [filter…] [--limit 50] [--json]   e.g. relay search status:5xx host:api.acme.com\n  relay tail [filter…]\n  relay rules check <file> | push <file> | pull\n  relay decrypt [on|off]   (HTTPS decryption; off tunnels HTTPS untouched)\n  relay throttle [3g|edge|lte|lte-lossy|high-latency|offline|off]   (slow all traffic that no rule throttles)\n  relay breakpoints [list] | wait [--timeout 30] | show <id> | resume <id> [--status N] [--header \"Name: value\"]… [--remove-header Name]… [--body TEXT | --body-file FILE] | abort <id>   (add --phase request|response when both are held)\n  relay proxy start [--port 8888] | stop\n  relay system-proxy on | off | status\n  relay devices [list] | connect <id> | disconnect <id>\n\nstandalone:\n  relay serve [--port 8888] [--listen 127.0.0.1] [--json]\n  relay get <url> [--ca FILE]\n  relay fetch <url> [--proxy 127.0.0.1:8888]\n  relay ca\n\ncommon: --data-dir DIR, --socket PATH"
             );
             Ok(())
         }
@@ -338,6 +338,40 @@ async fn control(args: &Args, data_dir: &std::path::Path) -> Result<()> {
                 .as_str()
                 .unwrap_or("")
         ),
+        ("decrypt", _) | ("throttle", _) => {
+            let mut params = json!({});
+            match (args.cmd.as_str(), sub) {
+                (_, "") | (_, "status") => {}
+                ("decrypt", "on") => params["decrypt"] = json!(true),
+                ("decrypt", "off") => params["decrypt"] = json!(false),
+                ("decrypt", other) => {
+                    anyhow::bail!("usage: relay decrypt [on|off] (got `{other}`)")
+                }
+                (_, preset) => params["throttle"] = json!(preset),
+            }
+            let r = if params.as_object().is_some_and(|o| o.is_empty()) {
+                c.call("settings.get", Value::Null).await?
+            } else {
+                c.call("settings.set", params).await?
+            };
+            if args.flags.contains("json") {
+                println!("{}", pretty(&r));
+            } else if args.cmd == "decrypt" {
+                println!(
+                    "HTTPS decryption is {}",
+                    if r["decrypt"].as_bool() == Some(true) {
+                        "on"
+                    } else {
+                        "off (HTTPS passes through untouched)"
+                    }
+                );
+            } else {
+                match r["throttle"].as_str() {
+                    Some(p) => println!("throttling all traffic: {p}"),
+                    None => println!("throttle is off"),
+                }
+            }
+        }
         ("breakpoints", "") | ("breakpoints", "list") | ("breakpoints", "wait") => {
             let held = if sub == "wait" {
                 let secs: u64 = args

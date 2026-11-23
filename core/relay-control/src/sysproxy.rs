@@ -191,11 +191,14 @@ impl Networksetup {
             .output()
             .context("running networksetup")?;
         if !out.status.success() {
-            bail!(
-                "networksetup {} failed: {}",
-                args.join(" "),
-                String::from_utf8_lossy(&out.stderr).trim()
-            );
+            // networksetup reports most errors on stdout, so show whichever has text.
+            let err = String::from_utf8_lossy(&out.stderr);
+            let msg = String::from_utf8_lossy(&out.stdout);
+            let why = [err.trim(), msg.trim()]
+                .into_iter()
+                .find(|t| !t.is_empty())
+                .unwrap_or("no message; usually this account may not change network settings (managed Mac)");
+            bail!("networksetup {} failed: {why}", args.join(" "));
         }
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     }

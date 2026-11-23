@@ -311,6 +311,72 @@ fn rule_kind(a: &relay_model::rules::RuleAction) -> &'static str {
     }
 }
 
+fn unique_rule_id(set: &relay_model::rules::RuleSet, kind: &str, host: &str) -> String {
+    let slug: String = host
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let base = format!("{kind}-{slug}");
+    (1..)
+        .map(|n| {
+            if n == 1 {
+                base.clone()
+            } else {
+                format!("{base}-{n}")
+            }
+        })
+        .find(|c| !set.rules.iter().any(|r| &r.id == c))
+        .unwrap()
+}
+
+/// A rule aimed at one captured request (its method, host and path without the query).
+fn rule_for(
+    id: &str,
+    request: &FfiTransaction,
+    action: relay_model::rules::RuleAction,
+) -> relay_model::rules::Rule {
+    let path = request.path.split('?').next().unwrap_or("/").to_owned();
+    relay_model::rules::Rule {
+        id: id.to_owned(),
+        name: format!("{} {}{}", request.method, request.host, path),
+        enabled: true,
+        matcher: relay_model::rules::Matcher {
+            method: Some(request.method.clone()),
+            host: Some(request.host.clone()),
+            path: Some(path),
+            ..Default::default()
+        },
+        action,
+    }
+}
+
+fn rule_file(a: &relay_model::rules::RuleAction) -> (String, u16) {
+    match a {
+        relay_model::rules::RuleAction::MapLocal { file, status, .. } => (file.clone(), *status),
+        _ => (String::new(), 0),
+    }
+}
+
+/// Expands `~` and checks that the file can be read.
+fn checked_file(path: &str) -> Result<String, RelayError> {
+    let path = path.trim();
+    let expanded = match path.strip_prefix("~/") {
+        Some(rest) => std::env::var("HOME")
+            .map(|h| format!("{h}/{rest}"))
+            .unwrap_or_else(|_| path.to_owned()),
+        None => path.to_owned(),
+    };
+    match std::fs::metadata(&expanded) {
+        Ok(m) if m.is_file() => Ok(expanded),
+        Ok(_) => Err(RelayError::Failed {
+            reason: format!("{expanded} is a folder, not a file"),
+        }),
+        Err(e) => Err(RelayError::Failed {
+            reason: format!("cannot read {expanded}: {e}"),
+        }),
+    }
+}
+
 fn rule_summary(r: &relay_model::rules::Rule) -> String {
     let m = &r.matcher;
     let mut parts = vec![];
@@ -341,6 +407,9 @@ pub struct FfiRule {
     pub kind: String,
     /// What it matches, e.g. `GET api.acme.com /v2/products`.
     pub summary: String,
+    /// The file a `map local` rule answers from (empty for other kinds).
+    pub file: String,
+    pub status: u16,
 }
 
 /// A request or response held at a breakpoint.
@@ -666,6 +735,8 @@ impl RelayEngine {
                 enabled: r.enabled,
                 kind: rule_kind(&r.action).into(),
                 summary: rule_summary(r),
+                file: rule_file(&r.action).0,
+                status: rule_file(&r.action).1,
             })
             .collect()
     }
@@ -690,8 +761,68 @@ impl RelayEngine {
                 enabled: r.enabled,
                 kind: rule_kind(&r.action).into(),
                 summary: rule_summary(r),
+                file: rule_file(&r.action).0,
+                status: rule_file(&r.action).1,
             })
             .collect()
+    }
+
+    /// Adds a `map local` rule for this request that answers from the file at `file`
+    /// (absolute, `~/…`, or relative to the Relay data folder).
+    pub fn add_map_local_rule(
+        &self,
+        request: FfiTransaction,
+        file: String,
+        status: u16,
+    ) -> Result<String, RelayError> {
+        let file = checked_file(&file)?;
+        let mut set = self.current_rules();
+        let id = unique_rule_id(&set, "map-local", &request.host);
+        set.rules.push(rule_for(
+            &id,
+            &request,
+            relay_model::rules::RuleAction::MapLocal {
+                file,
+                status: if status == 0 { 200 } else { status },
+                headers: Default::default(),
+            },
+        ));
+        self.save_rules(set, None)
+            .map_err(|reason| RelayError::Failed { reason })?;
+        Ok(id)
+    }
+
+    /// Points an existing `map local` rule at another file and/or status.
+    pub fn set_map_local_file(
+        &self,
+        id: String,
+        file: String,
+        status: u16,
+    ) -> Result<(), RelayError> {
+        let file = checked_file(&file)?;
+        let mut set = self.current_rules();
+        match set
+            .rules
+            .iter_mut()
+            .find(|r| r.id == id)
+            .map(|r| &mut r.action)
+        {
+            Some(relay_model::rules::RuleAction::MapLocal {
+                file: f, status: s, ..
+            }) => {
+                *f = file;
+                if status != 0 {
+                    *s = status;
+                }
+            }
+            _ => {
+                return Err(RelayError::Failed {
+                    reason: format!("`{id}` is not a map local rule"),
+                });
+            }
+        }
+        self.save_rules(set, None)
+            .map_err(|reason| RelayError::Failed { reason })
     }
 
     pub fn set_rule_enabled(&self, id: String, enabled: bool) -> Result<(), RelayError> {
@@ -724,25 +855,9 @@ impl RelayEngine {
         request: FfiTransaction,
     ) -> Result<String, RelayError> {
         let fail = |reason: String| RelayError::Failed { reason };
-        use relay_model::rules::{Matcher, Phase, Rule, RuleAction, ThrottleProfile};
+        use relay_model::rules::{Phase, RuleAction, ThrottleProfile};
         let mut set = self.current_rules();
-        let path = request.path.split('?').next().unwrap_or("/").to_owned();
-        let host_slug: String = request
-            .host
-            .chars()
-            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-            .collect();
-        let base = format!("{kind}-{host_slug}");
-        let id = (1..)
-            .map(|n| {
-                if n == 1 {
-                    base.clone()
-                } else {
-                    format!("{base}-{n}")
-                }
-            })
-            .find(|c| !set.rules.iter().any(|r| &r.id == c))
-            .unwrap();
+        let id = unique_rule_id(&set, &kind, &request.host);
         let action = match kind.as_str() {
             "block" => RuleAction::Block { status: 403 },
             "breakpoint" => RuleAction::Breakpoint { phase: Phase::Both },
@@ -772,18 +887,7 @@ impl RelayEngine {
             }
             other => return Err(fail(format!("unknown rule kind `{other}`"))),
         };
-        set.rules.push(Rule {
-            id: id.clone(),
-            name: format!("{} {}{}", request.method, request.host, path),
-            enabled: true,
-            matcher: Matcher {
-                method: Some(request.method.clone()),
-                host: Some(request.host.clone()),
-                path: Some(path),
-                ..Default::default()
-            },
-            action,
-        });
+        set.rules.push(rule_for(&id, &request, action));
         self.save_rules(set, None).map_err(fail)?;
         Ok(id)
     }
@@ -944,6 +1048,30 @@ mod tests {
         assert!(!engine.list_rules()[0].enabled);
         // The saved file is valid YAML in the shared format.
         assert!(engine.set_rules(engine.rules_yaml()).is_empty());
+        // Map local to a file the user picked.
+        let file = dir.join("custom.json");
+        std::fs::write(&file, "{}").unwrap();
+        let id = engine
+            .add_map_local_rule(sample(), file.to_string_lossy().into(), 202)
+            .unwrap();
+        let r = engine
+            .list_rules()
+            .into_iter()
+            .find(|r| r.id == id)
+            .unwrap();
+        assert_eq!((r.kind.as_str(), r.status), ("map local", 202));
+        assert_eq!(r.file, file.to_string_lossy());
+        assert!(
+            engine
+                .add_map_local_rule(sample(), "/no/such/file.json".into(), 200)
+                .is_err()
+        );
+        assert!(
+            engine
+                .set_map_local_file(id.clone(), "/no/such".into(), 0)
+                .is_err()
+        );
+        engine.remove_rule(id).unwrap();
         engine.remove_rule(block).unwrap();
         assert_eq!(engine.list_rules().len(), 2);
     }

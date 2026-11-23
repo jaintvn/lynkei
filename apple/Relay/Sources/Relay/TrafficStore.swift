@@ -43,6 +43,15 @@ final class TrafficStore {
     func refreshRules() { if let e = engine { rules = e.listRules() } }
     func rulesFor(_ tx: FfiTransaction) -> [FfiRule] { engine?.rulesFor(request: tx) ?? [] }
     func ruleKind(_ id: String) -> String { rules.first { $0.id == id }?.kind ?? "" }
+    func addMapLocal(_ tx: FfiTransaction, file: String, status: UInt16) throws {
+        guard let engine else { return }
+        _ = try engine.addMapLocalRule(request: tx, file: file, status: status)
+        refreshRules()
+    }
+    func setMapLocalFile(_ id: String, file: String, status: UInt16) throws {
+        try engine?.setMapLocalFile(id: id, file: file, status: status)
+        refreshRules()
+    }
     func rulesYAML() -> String { engine?.rulesYaml() ?? "" }
     func applyRulesYAML(_ yaml: String) -> [String] {
         let problems = engine?.setRules(yaml: yaml) ?? ["Relay is not running"]

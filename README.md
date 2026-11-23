@@ -118,7 +118,7 @@ Applied today: block, map local, map remote, rewrite (headers, status, JSON path
 
 A request row shows a small badge for each rule that touched it, and the inspector's **Rules for this endpoint** box lists every rule that fits that endpoint with its on/off switch (disabled rules are greyed and say "Off — not applied").
 
-In the Mac app, **Rules** (toolbar) lists rules with on/off switches and a YAML editor, and right-clicking a request adds a rule for it: breakpoint, block, map local (answer with that response, saved under `mocks/`), throttle to 3G, or make it fail.
+In the Mac app, **Rules** (toolbar) lists rules with on/off switches and a YAML editor, and right-clicking a request adds a rule for it: breakpoint, block, map local (pick or type the path of a file to answer with, or reuse the recorded response, saved under `mocks/`), throttle to 3G, or make it fail.
 
 ## Mac app
 

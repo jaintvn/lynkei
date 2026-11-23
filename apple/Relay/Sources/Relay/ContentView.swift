@@ -7,6 +7,7 @@ struct ContentView: View {
     @State private var simMessage: String?
     @State private var showConnect = false
     @State private var showRules = false
+    @State private var mapLocalFor: FfiTransaction?
 
     var body: some View {
         @Bindable var store = store
@@ -28,6 +29,7 @@ struct ContentView: View {
         .onAppear { simulators = Simulators.booted() }
         .sheet(isPresented: $showConnect) { ConnectView() }
         .sheet(isPresented: $showRules) { RulesView() }
+        .sheet(item: $mapLocalFor) { MapLocalView(tx: $0) }
         .sheet(item: Binding(get: { store.paused.first }, set: { _ in })) { BreakpointView(item: $0).id($0.id) }
     }
 
@@ -181,8 +183,7 @@ struct ContentView: View {
     private func ruleMenu(for tx: FfiTransaction) -> some View {
         Button("Breakpoint on \(tx.host)\(tx.path.split(separator: "?").first.map { String($0) } ?? "")") { store.addQuickRule("breakpoint", for: tx) }
         Button("Block this request") { store.addQuickRule("block", for: tx) }
-        Button("Map local: answer with this response") { store.addQuickRule("map-local", for: tx) }
-            .disabled(tx.responseBodyPreview == nil)
+        Button("Map local to a file…") { mapLocalFor = tx }
         Divider()
         Button("Throttle to 3G") { store.addQuickRule("throttle-3g", for: tx) }
         Button("Make it fail (offline)") { store.addQuickRule("offline", for: tx) }

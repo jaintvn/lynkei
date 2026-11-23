@@ -1,5 +1,6 @@
 import RelayKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct ContentView: View {
     @Environment(TrafficStore.self) private var store
@@ -100,11 +101,46 @@ struct ContentView: View {
             }
             .buttonStyle(PillButtonStyle())
 
+            Menu {
+                Button("Export HAR…") { exportHAR() }
+                Button("Import HAR…") { importHAR() }
+            } label: {
+                Label("HAR", systemImage: "square.and.arrow.up.on.square")
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .help("Export the requests shown (or all history) as a HAR file, or open a HAR file")
+
             Button("Clear") { store.clear() }.buttonStyle(PillButtonStyle())
         }
         .padding(.horizontal, 14)
         .frame(height: 52)
         .background(Theme.panel)
+    }
+
+    private func exportHAR() {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.json]
+        panel.nameFieldStringValue = "relay-traffic.har"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            try store.exportHAR().write(to: url, atomically: true, encoding: .utf8)
+        } catch {
+            store.errorMessage = "Export failed: \(error.localizedDescription)"
+        }
+    }
+
+    private func importHAR() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.json, .data]
+        panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            let n = try store.importHAR(String(contentsOf: url, encoding: .utf8))
+            store.status = "Imported \(n) request\(n == 1 ? "" : "s") from \(url.lastPathComponent)"
+        } catch {
+            store.errorMessage = "Import failed: \(error)"
+        }
     }
 
     private var sourceMenu: some View {

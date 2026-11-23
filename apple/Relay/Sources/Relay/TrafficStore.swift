@@ -185,6 +185,20 @@ final class TrafficStore {
         status = "Stopped"
     }
 
+    /// HAR for the requests matching the current search and source filter (all stored history).
+    func exportHAR() throws -> String {
+        guard let engine else { throw NSError(domain: "Relay", code: 1, userInfo: [NSLocalizedDescriptionKey: "Start Relay first"]) }
+        return try engine.exportHar(query: query)
+    }
+
+    /// Shows the exchanges of a HAR file in the list (and keeps them in history). Returns how many.
+    func importHAR(_ text: String) throws -> Int {
+        guard let engine else { throw NSError(domain: "Relay", code: 1, userInfo: [NSLocalizedDescriptionKey: "Start Relay first"]) }
+        let added = try engine.importHar(har: text)
+        for tx in added { append(tx) }
+        return added.count
+    }
+
     func clear() {
         revision &+= 1
         transactions.removeAll()

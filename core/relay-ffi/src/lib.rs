@@ -573,6 +573,49 @@ impl RelayEngine {
             .collect())
     }
 
+    /// Everything the filter matches (empty = all stored traffic), as a HAR 1.2 document, oldest first.
+    pub fn export_har(&self, query: String) -> Result<String, RelayError> {
+        let filter =
+            relay_model::filter::Filter::parse(&query).map_err(|e| RelayError::Failed {
+                reason: e.to_string(),
+            })?;
+        let store = self
+            .store
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| RelayError::Failed {
+                reason: "start the engine first".into(),
+            })?;
+        let mut txs: Vec<_> = store
+            .search(&filter, 1_000_000)?
+            .into_iter()
+            .map(|s| s.tx)
+            .collect();
+        txs.sort_by_key(|t| t.started_at_ms);
+        Ok(relay_model::har::export(&txs))
+    }
+
+    /// Adds the exchanges of a HAR document to the stored history and returns them (ids are
+    /// unique, so they can be shown next to live traffic).
+    pub fn import_har(&self, har: String) -> Result<Vec<FfiTransaction>, RelayError> {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as u64);
+        let txs = relay_model::har::import(&har, now_ms * 1000)
+            .map_err(|reason| RelayError::Failed { reason })?;
+        let store = self
+            .store
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| RelayError::Failed {
+                reason: "start the engine first".into(),
+            })?;
+        store.upsert(&format!("import-{now_ms}"), &txs)?;
+        Ok(txs.into_iter().map(Into::into).collect())
+    }
+
     /// Checks a filter without running it; returns the error message, or `None` when valid.
     pub fn validate_filter(&self, query: String) -> Option<String> {
         relay_model::filter::Filter::parse(&query)
@@ -1074,5 +1117,37 @@ mod tests {
         engine.remove_rule(id).unwrap();
         engine.remove_rule(block).unwrap();
         assert_eq!(engine.list_rules().len(), 2);
+    }
+    struct Quiet;
+    impl TrafficListener for Quiet {
+        fn on_transaction(&self, _transaction: FfiTransaction) {}
+    }
+
+    #[test]
+    fn har_import_lands_in_history_and_exports_again() {
+        let dir = std::env::temp_dir().join(format!("relay-ffi-har-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let engine = RelayEngine::new(dir.to_string_lossy().into()).unwrap();
+        engine
+            .start("127.0.0.1".into(), 0, Box::new(Quiet))
+            .unwrap();
+
+        let har = r#"{"log":{"entries":[{"startedDateTime":"2026-01-02T03:04:05Z","time":30,
+            "request":{"method":"GET","url":"https://api.acme.com/v2/items?page=2","httpVersion":"h2","headers":[],"bodySize":0},
+            "response":{"status":404,"headers":[],"content":{"size":2,"text":"{}"},"bodySize":2}}]}}"#;
+        let shown = engine.import_har(har.into()).unwrap();
+        assert_eq!(shown.len(), 1);
+        assert_eq!(shown[0].status, Some(404));
+
+        let out = engine
+            .export_har("host:api.acme.com status:4xx".into())
+            .unwrap();
+        assert!(
+            out.contains("https://api.acme.com/v2/items?page=2"),
+            "{out}"
+        );
+        assert!(engine.import_har("not har".into()).is_err());
+        engine.stop();
     }
 }

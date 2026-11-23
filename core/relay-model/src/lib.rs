@@ -1,6 +1,7 @@
 //! Shared data model for Relay. Pure data: no I/O, no platform code.
 
 pub mod filter;
+pub mod har;
 pub mod rules;
 
 use serde::{Deserialize, Serialize};

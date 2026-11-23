@@ -129,6 +129,10 @@ scripts/build-apple.sh && scripts/make-mac-app.sh && open apple/Relay/build/Rela
 
 Click **Connect device**. Relay finds booted iOS Simulators and Android emulators or USB phones and sets each one up (proxy and certificate) with one click. For an iPhone on Wi-Fi, scan the QR code on that screen. From a terminal, `relay devices connect <id>` does the same.
 
+## HAR import and export
+
+The **HAR** menu in the Mac app exports the requests matching your current search (or everything stored) as a HAR 1.2 file, and opens HAR files from Relay, browsers or Charles. Bodies in an export are the text previews Relay keeps, so large or binary bodies are cut or left out.
+
 ## Try it with the demo app
 
 The demo apps call a local mock API instead of httpbin.org, so they work offline and are never rate limited. Start it first and leave it running:

@@ -1,14 +1,17 @@
 #!/usr/bin/env bash
 # Builds the Swift app and wraps it in a minimal Relay.app bundle (unsigned, for local development).
-# Usage: scripts/make-mac-app.sh [debug|release]   → apple/Relay/build/Relay.app
+# Usage: scripts/make-mac-app.sh [debug|release] [universal]   → apple/Relay/build/Relay.app
+# `universal` builds for Apple Silicon and Intel (run scripts/build-apple.sh with UNIVERSAL=1 first).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CONFIG="${1:-debug}"
 PKG="$ROOT/apple/Relay"
 
-swift build --package-path "$PKG" -c "$CONFIG"
-BIN="$(swift build --package-path "$PKG" -c "$CONFIG" --show-bin-path)/Relay"
+ARCHS=()
+[ "${2:-}" = universal ] && ARCHS=(--arch arm64 --arch x86_64)
+swift build --package-path "$PKG" -c "$CONFIG" ${ARCHS[@]+"${ARCHS[@]}"}
+BIN="$(swift build --package-path "$PKG" -c "$CONFIG" ${ARCHS[@]+"${ARCHS[@]}"} --show-bin-path)/Relay"
 
 APP="$PKG/build/Relay.app"
 rm -rf "$APP"

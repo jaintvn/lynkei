@@ -25,3 +25,6 @@ design/stitch/
 ios/**/build/
 ios/**/DerivedData/
 ios/**/build-device/
+
+# Built bundles for sharing
+dist/

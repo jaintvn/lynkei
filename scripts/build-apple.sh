@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds relay-core for macOS (Apple Silicon), generates Swift bindings, and packages RelayFFI.xcframework
+# Builds relay-core for macOS (Apple Silicon; UNIVERSAL=1 adds Intel), generates Swift bindings, and packages RelayFFI.xcframework
 # into apple/RelayKit so the Swift packages can link it.
 set -euo pipefail
 
@@ -13,6 +13,12 @@ WORK="$ROOT/core/target/apple-bindings"
 cd "$ROOT/core"
 cargo build -p relay-ffi --release --target "$TARGET"
 LIB_DIR="$ROOT/core/target/$TARGET/release"
+STATIC="$LIB_DIR/librelay_ffi.a"
+if [ "${UNIVERSAL:-0}" = 1 ]; then
+  cargo build -p relay-ffi --release --target x86_64-apple-darwin
+  STATIC="$ROOT/core/target/librelay_ffi_universal.a"
+  lipo -create "$LIB_DIR/librelay_ffi.a" "$ROOT/core/target/x86_64-apple-darwin/release/librelay_ffi.a" -output "$STATIC"
+fi
 
 rm -rf "$WORK" && mkdir -p "$WORK/headers" "$WORK/swift"
 cargo run -q -p relay-ffi --bin uniffi-bindgen -- generate \
@@ -24,7 +30,7 @@ mv "$WORK/swift/"*.modulemap "$WORK/headers/module.modulemap"
 
 rm -rf "$KIT/RelayFFI.xcframework"
 xcodebuild -create-xcframework \
-  -library "$LIB_DIR/librelay_ffi.a" -headers "$WORK/headers" \
+  -library "$STATIC" -headers "$WORK/headers" \
   -output "$KIT/RelayFFI.xcframework" >/dev/null
 
 mkdir -p "$KIT/Sources/RelayKit/Generated"

@@ -27,3 +27,7 @@ android/**/local.properties
 android/relay-android/app/src/main/jniLibs/
 android/relay-android/app/src/main/java/uniffi/
 .kotlin/
+
+# iOS demo app build output
+ios/**/build/
+ios/**/DerivedData/

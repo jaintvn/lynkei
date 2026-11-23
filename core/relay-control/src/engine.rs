@@ -9,6 +9,7 @@ use anyhow::{Context, Result};
 use relay_model::Transaction;
 use relay_model::filter::Filter;
 use relay_model::rules::{RULES_VERSION, RuleSet};
+use relay_proxy::breakpoints::{BreakPhase, Edit, Paused};
 use relay_proxy::{EventSink, ProxyConfig, ProxyHandle};
 use relay_store::{Store, StoreConfig, StoreSink};
 use serde_json::{Value, json};
@@ -274,6 +275,61 @@ impl Engine {
                 *self.rules.lock().unwrap() = set;
                 Ok(json!({ "saved": true, "problems": [] }))
             }
+            "breakpoints.list" => Ok(json!(self.paused_json().await)),
+            "breakpoints.wait" => {
+                // Long-poll for scripts and agents: returns as soon as something is held.
+                let wait = params
+                    .get("timeout_ms")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(30_000)
+                    .min(120_000);
+                let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(wait);
+                loop {
+                    let held = self.paused_json().await;
+                    if !held.is_empty() || tokio::time::Instant::now() >= deadline {
+                        return Ok(json!(held));
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+            }
+            "breakpoints.resume" | "breakpoints.abort" => {
+                let id = params
+                    .get("tx_id")
+                    .and_then(Value::as_u64)
+                    .ok_or_else(|| bad("`tx_id` is required"))?;
+                let held = self.paused().await;
+                // Without `phase`, act on whichever phase of that transaction is held.
+                let phase = match params.get("phase").and_then(Value::as_str) {
+                    Some("request") => Some(BreakPhase::Request),
+                    Some("response") => Some(BreakPhase::Response),
+                    Some(_) => return Err(bad("`phase` is \"request\" or \"response\"")),
+                    None => held.iter().find(|p| p.tx_id == id).map(|p| p.phase),
+                };
+                let item =
+                    phase.and_then(|ph| held.iter().find(|p| p.tx_id == id && p.phase == ph));
+                let (Some(phase), Some(item)) = (phase, item) else {
+                    return Err(RpcError::new(
+                        RpcError::ENGINE,
+                        format!(
+                            "nothing is held for transaction {id} (already released, or timed out)"
+                        ),
+                    ));
+                };
+                let guard = self.proxy.lock().await;
+                let handle = guard
+                    .as_ref()
+                    .ok_or_else(|| RpcError::new(RpcError::ENGINE, "the proxy is not running"))?;
+                let done = if method == "breakpoints.abort" {
+                    handle.abort(id, phase)
+                } else {
+                    let edit = match params.get("edit") {
+                        None | Some(Value::Null) => None,
+                        Some(e) => Some(edit_from(e, item).map_err(|m| bad(&m))?),
+                    };
+                    handle.resume(id, phase, edit)
+                };
+                Ok(json!({ "done": done }))
+            }
             "devices.list" => {
                 let devices = self.devices.clone();
                 let list = tokio::task::spawn_blocking(move || devices.list())
@@ -379,4 +435,96 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     std::fs::write(&tmp, bytes)?;
     std::fs::rename(&tmp, path)?;
     Ok(())
+}
+
+/// Builds the edited message from the API's `edit` object. Anything left out keeps its held value:
+/// `{"status": 503}`, `{"set_headers": {"x-a": "b"}}` (add/replace), `{"remove_headers": ["x-c"]}`,
+/// `{"headers": [{name,value}…]}` (replace all), `{"body": "text"}`.
+fn edit_from(e: &Value, held: &Paused) -> Result<Edit, String> {
+    let mut headers = held.headers.clone();
+    if let Some(all) = e.get("headers") {
+        headers = all
+            .as_array()
+            .ok_or("`headers` must be a list of {name, value}")?
+            .iter()
+            .map(|h| {
+                Some(relay_model::Header {
+                    name: h.get("name")?.as_str()?.to_owned(),
+                    value: h.get("value")?.as_str()?.to_owned(),
+                })
+            })
+            .collect::<Option<Vec<_>>>()
+            .ok_or("every header needs a string `name` and `value`")?;
+    }
+    if let Some(names) = e.get("remove_headers").and_then(Value::as_array) {
+        for n in names.iter().filter_map(Value::as_str) {
+            headers.retain(|h| !h.name.eq_ignore_ascii_case(n));
+        }
+    }
+    if let Some(set) = e.get("set_headers").and_then(Value::as_object) {
+        for (name, value) in set {
+            let value = value
+                .as_str()
+                .ok_or("`set_headers` values must be strings")?;
+            headers.retain(|h| !h.name.eq_ignore_ascii_case(name));
+            headers.push(relay_model::Header {
+                name: name.clone(),
+                value: value.to_owned(),
+            });
+        }
+    }
+    let body = match e.get("body") {
+        None | Some(Value::Null) => held.body.clone(),
+        Some(b) => b
+            .as_str()
+            .ok_or("`body` must be a string")?
+            .as_bytes()
+            .to_vec(),
+    };
+    let status = match e.get("status") {
+        None | Some(Value::Null) => held.status,
+        Some(v) => Some(
+            v.as_u64()
+                .filter(|s| (100..600).contains(s))
+                .ok_or("`status` must be 100-599")? as u16,
+        ),
+    };
+    Ok(Edit {
+        status,
+        headers,
+        body,
+    })
+}
+
+impl Engine {
+    async fn paused(&self) -> Vec<Paused> {
+        self.proxy
+            .lock()
+            .await
+            .as_ref()
+            .map(|h| h.paused())
+            .unwrap_or_default()
+    }
+
+    async fn paused_json(&self) -> Vec<Value> {
+        self.paused()
+            .await
+            .into_iter()
+            .map(|p| {
+                let text = std::str::from_utf8(&p.body).ok();
+                json!({
+                    "tx_id": p.tx_id,
+                    "phase": if p.phase == BreakPhase::Request { "request" } else { "response" },
+                    "rule": p.rule,
+                    "method": p.method,
+                    "url": p.url,
+                    "status": p.status,
+                    "headers": p.headers,
+                    "body": text.map(str::to_owned).unwrap_or_else(|| String::from_utf8_lossy(&p.body).into_owned()),
+                    "body_is_text": text.is_some(),
+                    "body_size": p.body.len(),
+                })
+            })
+            .collect()
+    }
 }

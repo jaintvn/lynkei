@@ -293,3 +293,125 @@ async fn devices_are_listed_connected_and_disconnected_through_the_api() {
         .to_string();
     assert!(e.contains("not running or attached"), "{e}");
 }
+
+#[tokio::test]
+async fn breakpoints_are_listed_edited_resumed_and_aborted_through_the_api() {
+    let (_engine, mut c, proxy, _dir, _) = setup("breakpoints").await;
+    let origin = origin().await;
+    let rules = "version: 1\nrules:\n  - { id: hold, kind: breakpoint, match: { path: /held }, phase: request }\n  - { id: hold-resp, kind: breakpoint, match: { path: /answer }, phase: response }\n";
+    assert_eq!(
+        c.call("rules.set", json!({"yaml": rules})).await.unwrap()["saved"],
+        true
+    );
+    assert_eq!(
+        c.call("breakpoints.list", Value::Null).await.unwrap(),
+        json!([])
+    );
+
+    // A held request: wait for it, add a header, let it go.
+    let url = format!("http://127.0.0.1:{origin}/held?x=1");
+    let client = tokio::spawn({
+        let url = url.clone();
+        async move { get(proxy, &url).await }
+    });
+    let held = c
+        .call("breakpoints.wait", json!({"timeout_ms": 5000}))
+        .await
+        .unwrap();
+    assert_eq!(held[0]["phase"], "request");
+    assert_eq!(held[0]["rule"], "hold");
+    assert_eq!(held[0]["method"], "GET");
+    let id = held[0]["tx_id"].as_u64().unwrap();
+    assert!(!client.is_finished(), "the app is waiting");
+    let done = c
+        .call(
+            "breakpoints.resume",
+            json!({"tx_id": id, "edit": {"set_headers": {"x-edited": "by-api"}}}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(done["done"], true);
+    client.await.unwrap();
+    let seen = c
+        .call("traffic.search", json!({"query": "header:x-edited=by-api"}))
+        .await
+        .unwrap();
+    assert_eq!(
+        seen.as_array().unwrap().len(),
+        1,
+        "the edit reached the server"
+    );
+
+    // A held response: change its status and body.
+    let url = format!("http://127.0.0.1:{origin}/answer");
+    let client = tokio::spawn(async move {
+        relay_proxy::client::fetch_via_proxy(
+            format!("127.0.0.1:{proxy}").parse().unwrap(),
+            &url,
+            &[],
+        )
+        .await
+        .unwrap()
+    });
+    let held = c
+        .call("breakpoints.wait", json!({"timeout_ms": 5000}))
+        .await
+        .unwrap();
+    assert_eq!(held[0]["phase"], "response");
+    assert_eq!(held[0]["status"], 200);
+    assert_eq!(held[0]["body"], "hello from /answer");
+    let id = held[0]["tx_id"].as_u64().unwrap();
+    c.call(
+        "breakpoints.resume",
+        json!({"tx_id": id, "phase": "response", "edit": {"status": 503, "body": "down for maintenance"}}),
+    )
+    .await
+    .unwrap();
+    let res = client.await.unwrap();
+    assert_eq!(res.status, 503);
+    assert_eq!(&res.body[..], b"down for maintenance");
+
+    // Abort, and the error cases.
+    let url = format!("http://127.0.0.1:{origin}/held?abort=1");
+    let client = tokio::spawn(async move {
+        relay_proxy::client::fetch_via_proxy(
+            format!("127.0.0.1:{proxy}").parse().unwrap(),
+            &url,
+            &[],
+        )
+        .await
+    });
+    let held = c
+        .call("breakpoints.wait", json!({"timeout_ms": 5000}))
+        .await
+        .unwrap();
+    let id = held[0]["tx_id"].as_u64().unwrap();
+    assert_eq!(
+        c.call("breakpoints.abort", json!({"tx_id": id}))
+            .await
+            .unwrap()["done"],
+        true
+    );
+    let aborted = client.await.unwrap();
+    assert!(
+        aborted.map_or(true, |r| r.status >= 500),
+        "the app got an error"
+    );
+    assert!(
+        c.call("breakpoints.resume", json!({"tx_id": id}))
+            .await
+            .is_err(),
+        "already released"
+    );
+    assert!(
+        c.call("breakpoints.resume", json!({"tx_id": 1, "phase": "later"}))
+            .await
+            .is_err()
+    );
+    // Nothing held: wait times out with an empty list.
+    let none = c
+        .call("breakpoints.wait", json!({"timeout_ms": 150}))
+        .await
+        .unwrap();
+    assert_eq!(none, json!([]));
+}

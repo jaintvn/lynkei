@@ -58,7 +58,17 @@ fn parse_args() -> Args {
             if matches!(name, "json" | "write") {
                 flags.insert(name.to_string());
             } else if let Some(v) = raw.get(i + 1) {
-                opts.insert(name.to_string(), v.clone());
+                // `--header` and `--remove-header` may be given several times.
+                let repeatable = matches!(name, "header" | "remove-header");
+                match opts.get_mut(name) as Option<&mut String> {
+                    Some(old) if repeatable => {
+                        old.push('\n');
+                        old.push_str(v);
+                    }
+                    _ => {
+                        opts.insert(name.to_string(), v.clone());
+                    }
+                }
                 i += 1;
             }
         } else if cmd.is_none() {
@@ -96,9 +106,8 @@ async fn main() -> Result<()> {
         "serve" => serve(&args, data_dir).await,
         "fetch" => fetch(&args, data_dir).await,
         "get" => get(&args).await,
-        "status" | "search" | "tail" | "rules" | "proxy" | "system-proxy" | "devices" => {
-            control(&args, &data_dir).await
-        }
+        "status" | "search" | "tail" | "rules" | "breakpoints" | "proxy" | "system-proxy"
+        | "devices" => control(&args, &data_dir).await,
         "ca" => {
             let provider = Arc::new(rustls::crypto::ring::default_provider());
             let ca = relay_proxy::ca::CertAuthority::load_or_create(&data_dir, provider)?;
@@ -107,7 +116,7 @@ async fn main() -> Result<()> {
         }
         _ => {
             eprintln!(
-                "usage (with relayd running):\n  relay status\n  relay search [filter…] [--limit 50] [--json]   e.g. relay search status:5xx host:api.acme.com\n  relay tail [filter…]\n  relay rules check <file> | push <file> | pull\n  relay proxy start [--port 8888] | stop\n  relay system-proxy on | off | status\n  relay devices [list] | connect <id> | disconnect <id>\n\nstandalone:\n  relay serve [--port 8888] [--listen 127.0.0.1] [--json]\n  relay get <url> [--ca FILE]\n  relay fetch <url> [--proxy 127.0.0.1:8888]\n  relay ca\n\ncommon: --data-dir DIR, --socket PATH"
+                "usage (with relayd running):\n  relay status\n  relay search [filter…] [--limit 50] [--json]   e.g. relay search status:5xx host:api.acme.com\n  relay tail [filter…]\n  relay rules check <file> | push <file> | pull\n  relay breakpoints [list] | wait [--timeout 30] | show <id> | resume <id> [--status N] [--header \"Name: value\"]… [--remove-header Name]… [--body TEXT | --body-file FILE] | abort <id>   (add --phase request|response when both are held)\n  relay proxy start [--port 8888] | stop\n  relay system-proxy on | off | status\n  relay devices [list] | connect <id> | disconnect <id>\n\nstandalone:\n  relay serve [--port 8888] [--listen 127.0.0.1] [--json]\n  relay get <url> [--ca FILE]\n  relay fetch <url> [--proxy 127.0.0.1:8888]\n  relay ca\n\ncommon: --data-dir DIR, --socket PATH"
             );
             Ok(())
         }
@@ -329,6 +338,121 @@ async fn control(args: &Args, data_dir: &std::path::Path) -> Result<()> {
                 .as_str()
                 .unwrap_or("")
         ),
+        ("breakpoints", "") | ("breakpoints", "list") | ("breakpoints", "wait") => {
+            let held = if sub == "wait" {
+                let secs: u64 = args
+                    .opts
+                    .get("timeout")
+                    .map(|t| t.parse())
+                    .transpose()?
+                    .unwrap_or(30);
+                eprintln!("waiting up to {secs} s for a request to be held…");
+                c.call("breakpoints.wait", json!({"timeout_ms": secs * 1000}))
+                    .await?
+            } else {
+                c.call("breakpoints.list", Value::Null).await?
+            };
+            if args.flags.contains("json") {
+                println!("{}", pretty(&held));
+            } else {
+                let list = held.as_array().cloned().unwrap_or_default();
+                if list.is_empty() {
+                    println!("nothing is held");
+                }
+                for h in &list {
+                    println!(
+                        "{:<6} {:<8} {:<5} {}   (rule {})",
+                        h["tx_id"],
+                        h["phase"].as_str().unwrap_or(""),
+                        h["method"].as_str().unwrap_or(""),
+                        h["url"].as_str().unwrap_or(""),
+                        h["rule"].as_str().unwrap_or("")
+                    );
+                }
+            }
+        }
+        ("breakpoints", "show") => {
+            let id: u64 = args
+                .positional
+                .get(1)
+                .context("usage: relay breakpoints show <id>")?
+                .parse()?;
+            let held = c.call("breakpoints.list", Value::Null).await?;
+            let item = held
+                .as_array()
+                .and_then(|l| l.iter().find(|h| h["tx_id"].as_u64() == Some(id)))
+                .context("nothing is held for that id")?;
+            println!(
+                "{} {} {}",
+                item["phase"].as_str().unwrap_or(""),
+                item["method"].as_str().unwrap_or(""),
+                item["url"].as_str().unwrap_or("")
+            );
+            if let Some(s) = item["status"].as_u64() {
+                println!("status {s}");
+            }
+            for h in item["headers"].as_array().cloned().unwrap_or_default() {
+                println!(
+                    "{}: {}",
+                    h["name"].as_str().unwrap_or(""),
+                    h["value"].as_str().unwrap_or("")
+                );
+            }
+            println!("\n{}", item["body"].as_str().unwrap_or(""));
+        }
+        ("breakpoints", "resume") | ("breakpoints", "abort") => {
+            let id: u64 = args
+                .positional
+                .get(1)
+                .context("usage: relay breakpoints resume|abort <id> [options]")?
+                .parse()?;
+            let mut params = json!({"tx_id": id});
+            if let Some(p) = args.opts.get("phase") {
+                params["phase"] = json!(p);
+            }
+            if sub == "resume" {
+                let mut edit = serde_json::Map::new();
+                if let Some(s) = args.opts.get("status") {
+                    edit.insert("status".into(), json!(s.parse::<u16>()?));
+                }
+                if let Some(list) = args.opts.get("header") {
+                    let mut set = serde_json::Map::new();
+                    for line in list.lines() {
+                        let (n, v) = line
+                            .split_once(':')
+                            .context("--header needs \"Name: value\"")?;
+                        set.insert(n.trim().into(), json!(v.trim()));
+                    }
+                    edit.insert("set_headers".into(), Value::Object(set));
+                }
+                if let Some(list) = args.opts.get("remove-header") {
+                    edit.insert(
+                        "remove_headers".into(),
+                        json!(list.lines().collect::<Vec<_>>()),
+                    );
+                }
+                if let Some(b) = args.opts.get("body") {
+                    edit.insert("body".into(), json!(b));
+                } else if let Some(f) = args.opts.get("body-file") {
+                    edit.insert("body".into(), json!(std::fs::read_to_string(f)?));
+                }
+                if !edit.is_empty() {
+                    params["edit"] = Value::Object(edit);
+                }
+            }
+            let r = c.call(&format!("breakpoints.{sub}"), params).await?;
+            let verb = if sub == "resume" {
+                "released"
+            } else {
+                "aborted"
+            };
+            if r["done"].as_bool() == Some(true) {
+                println!("{verb}");
+            } else {
+                eprintln!("not {verb}: it was already decided or timed out");
+                std::process::exit(1);
+            }
+        }
         ("proxy", "start") => {
             let port: u16 = args
                 .opts

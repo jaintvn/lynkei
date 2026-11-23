@@ -14,6 +14,10 @@
 //! | `traffic.subscribe` | `{query?}` | `{}`, then `traffic.event` notifications `{transaction}` |
 //! | `rules.get` | – | `{yaml, problems}` |
 //! | `rules.set` | `{yaml}` | `{saved, problems}` (saved only when valid) |
+//! | `breakpoints.list` | – | held messages `[{tx_id, phase, rule, method, url, status, headers, body, body_is_text, body_size}]` |
+//! | `breakpoints.wait` | `{timeout_ms?}` | like `list`, but waits (max 120 s) until something is held |
+//! | `breakpoints.resume` | `{tx_id, phase?, edit?}` | `{done}`; `edit` = `{status?, headers?, set_headers?, remove_headers?, body?}`, anything left out stays as held |
+//! | `breakpoints.abort` | `{tx_id, phase?}` | `{done}`; the app gets an error |
 //! | `ca.info` | – | `{path, pem}` |
 //! | `system_proxy.status` / `.enable {port?}` / `.disable` | | system proxy state |
 

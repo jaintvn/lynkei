@@ -134,6 +134,8 @@ struct EndpointsView: View {
                             Sparkline(values: e.buckets, color: e.errors > 0 ? ec : Theme.accent).frame(width: 150, height: 24)
                         }
                         .frame(height: 44)
+                        .contentShape(Rectangle())
+                        .onTapGesture { store.showEndpoint(e.key); screen = .traffic }
                     }
                 }
                 .frame(minWidth: 1100, maxWidth: .infinity)

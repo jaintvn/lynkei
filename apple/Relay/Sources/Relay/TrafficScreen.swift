@@ -362,6 +362,18 @@ struct TrafficScreen: View {
             facet("Type", value: typeFilter, options: Array(Set(list.map(Analytics.typeBadge))).filter { !$0.isEmpty }.sorted()) { typeFilter = $0 }
             facet("Device", value: deviceFilter, options: Array(Set(list.map(Analytics.deviceLabel))).sorted()) { deviceFilter = $0 }
             facet("API version", value: versionFilter, options: Array(Set(list.compactMap { Analytics.apiVersion($0.path) })).sorted()) { versionFilter = $0 }
+            if let key = store.endpointFilter {
+                Button { store.endpointFilter = nil } label: {
+                    HStack(spacing: 5) {
+                        Text(key).font(.system(size: 11.5, design: .monospaced)).lineLimit(1)
+                        Image(systemName: "xmark").font(.system(size: 8, weight: .bold))
+                    }
+                    .padding(.horizontal, 9).frame(height: 26)
+                    .background(Capsule().fill(Theme.selection))
+                    .overlay(Capsule().stroke(Theme.accent))
+                }
+                .buttonStyle(.plain).help("Showing one endpoint. Click to show all calls.")
+            }
             viewSwitch
         }
         .padding(.horizontal, 14)
@@ -607,6 +619,18 @@ struct TrafficSidebar: View {
                 }
                 .padding(.leading, 8).padding(.bottom, 6)
                 ForEach(store.favApps.sorted(), id: \.self) { appRow($0, count: nil) }
+                ForEach(store.favHosts.sorted(), id: \.self) { host in
+                    HStack(spacing: 6) {
+                        Image(systemName: "globe").font(.system(size: 10)).foregroundStyle(Theme.muted).frame(width: 14)
+                        Text(host).font(.system(size: 12.5)).lineLimit(1)
+                        Spacer(minLength: 0)
+                        StarButton(on: true) { store.toggleFavHost(host) }
+                    }
+                    .padding(.horizontal, 8).padding(.vertical, 3)
+                    .background(RoundedRectangle(cornerRadius: 7).fill(store.search == "host:\(host)" ? Theme.selection : .clear))
+                    .contentShape(Rectangle())
+                    .onTapGesture { store.showHost(host) }
+                }
                 ForEach(store.favEndpoints.sorted(), id: \.self) { key in
                     HStack(spacing: 6) {
                         let parts = key.split(separator: " ", maxSplits: 1).map(String.init)
@@ -617,6 +641,9 @@ struct TrafficSidebar: View {
                         StarButton(on: true) { store.toggleFavEndpoint(key) }
                     }
                     .padding(.horizontal, 8).padding(.vertical, 3)
+                    .background(RoundedRectangle(cornerRadius: 7).fill(store.endpointFilter == key ? Theme.selection : .clear))
+                    .contentShape(Rectangle())
+                    .onTapGesture { store.showEndpoint(key) }
                 }
             }
         }
@@ -686,11 +713,12 @@ struct TrafficSidebar: View {
                         .foregroundStyle(open || active ? Theme.fg : Theme.muted).lineLimit(1)
                     Spacer(minLength: 0)
                     Text("\(h.count)").font(.system(size: 11, design: .monospaced)).foregroundStyle(Theme.muted)
+                    StarButton(on: store.favHosts.contains(h.host)) { store.toggleFavHost(h.host) }
                 }
-                .padding(.horizontal, 8).padding(.vertical, 5)
+                .padding(.horizontal, 8).padding(.vertical, 3)
                 .background(RoundedRectangle(cornerRadius: 7).fill(active ? Theme.selection : .clear))
                 .contentShape(Rectangle())
-                .onTapGesture { store.search = active ? "" : "host:\(h.host)" }
+                .onTapGesture { if active { store.search = ""; store.selection = nil } else { store.showHost(h.host) } }
                 if open {
                     let shown = h.paths.filter { q.isEmpty || h.host.lowercased().contains(q) || $0.path.lowercased().contains(q) }
                     ForEach(shown.prefix(q.isEmpty ? 6 : 20), id: \.key) { p in
@@ -702,6 +730,9 @@ struct TrafficSidebar: View {
                             StarButton(on: store.favEndpoints.contains(p.key)) { store.toggleFavEndpoint(p.key) }
                         }
                         .padding(.leading, 22).padding(.trailing, 4).padding(.vertical, 1)
+                        .background(RoundedRectangle(cornerRadius: 6).fill(store.endpointFilter == p.key ? Theme.selection : .clear))
+                        .contentShape(Rectangle())
+                        .onTapGesture { if store.endpointFilter == p.key { store.endpointFilter = nil } else { store.showEndpoint(p.key) } }
                     }
                 }
             }

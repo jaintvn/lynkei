@@ -32,12 +32,35 @@ final class TrafficStore {
     var favEndpoints: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "favEndpoints") ?? []) {
         didSet { UserDefaults.standard.set(Array(favEndpoints), forKey: "favEndpoints"); revision &+= 1 }
     }
+    var favHosts: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "favHosts") ?? []) {
+        didSet { UserDefaults.standard.set(Array(favHosts), forKey: "favHosts"); revision &+= 1 }
+    }
+    /// Show only one endpoint (an `Analytics.endpointKey`), chosen from the sidebar or the Endpoints screen.
+    var endpointFilter: String? { didSet { revision &+= 1 } }
     var focusMode = true { didSet { revision &+= 1 } }
-    var hasFavourites: Bool { !favApps.isEmpty || !favEndpoints.isEmpty }
+    var hasFavourites: Bool { !favApps.isEmpty || !favEndpoints.isEmpty || !favHosts.isEmpty }
     func isFavourite(_ t: FfiTransaction) -> Bool {
-        favApps.contains(Analytics.appName(t)) || favEndpoints.contains(Analytics.endpointKey(t))
+        favApps.contains(Analytics.appName(t)) || favEndpoints.contains(Analytics.endpointKey(t)) || favHosts.contains(t.host)
     }
     func toggleFavApp(_ name: String) { if favApps.contains(name) { favApps.remove(name) } else { favApps.insert(name) } }
+    func toggleFavHost(_ host: String) { if favHosts.contains(host) { favHosts.remove(host) } else { favHosts.insert(host) } }
+
+    /// Lists one endpoint and shows its newest call in the inspector.
+    func showEndpoint(_ key: String) {
+        endpointFilter = key
+        search = ""
+        selection = transactions.last { Analytics.endpointKey($0) == key }?.id
+        if focusMode && hasFavourites { focusMode = false }
+    }
+
+    /// Lists one domain and shows its newest call in the inspector.
+    func showHost(_ host: String) {
+        endpointFilter = nil
+        search = "host:\(host)"
+        selection = transactions.last { $0.host == host }?.id
+        if focusMode && hasFavourites { focusMode = false }
+    }
+
     func toggleFavEndpoint(_ key: String) { if favEndpoints.contains(key) { favEndpoints.remove(key) } else { favEndpoints.insert(key) } }
     /// Only favourites, if there are any (the island always works this way).
     func favouritesOnly(_ rows: [FfiTransaction]) -> [FfiTransaction] { hasFavourites ? rows.filter(isFavourite) : rows }
@@ -194,9 +217,10 @@ final class TrafficStore {
 
     /// Keeps the calls from the chosen app and device (no filter set: all of them).
     func scope(_ rows: [FfiTransaction]) -> [FfiTransaction] {
-        guard appFilter != nil || deviceFilter != nil || (focusMode && hasFavourites) else { return rows }
+        guard appFilter != nil || deviceFilter != nil || endpointFilter != nil || (focusMode && hasFavourites) else { return rows }
         return rows.filter { t in
             (!(focusMode && hasFavourites) || isFavourite(t))
+                && (endpointFilter == nil || Analytics.endpointKey(t) == endpointFilter)
                 && (appFilter == nil || Analytics.appName(t) == appFilter) && (deviceFilter == nil || Analytics.deviceLabel(t) == deviceFilter)
         }
     }

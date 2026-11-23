@@ -179,3 +179,52 @@ async fn send_inner(
         duration_ms,
     })
 }
+
+/// Root certificates from PEM text (the Relay CA), for [`send_via_proxy`].
+pub fn roots_from_pem(pem: &str) -> Vec<CertificateDer<'static>> {
+    use rustls::pki_types::pem::PemObject;
+    CertificateDer::pem_slice_iter(pem.as_bytes())
+        .filter_map(std::result::Result::ok)
+        .collect()
+}
+
+/// Sends `spec` through the proxy `count` times (1 to 200), one after another or all at once.
+/// Each result is the response or the error text.
+pub async fn send_many(
+    proxy: SocketAddr,
+    roots: &[CertificateDer<'static>],
+    spec: &ComposeRequest,
+    count: usize,
+    parallel: bool,
+) -> Vec<std::result::Result<ComposeResponse, String>> {
+    let count = count.clamp(1, 200);
+    if !parallel {
+        let mut out = Vec::with_capacity(count);
+        for _ in 0..count {
+            out.push(
+                send_via_proxy(proxy, roots, spec)
+                    .await
+                    .map_err(|e| format!("{e:#}")),
+            );
+        }
+        return out;
+    }
+    let mut set = tokio::task::JoinSet::new();
+    for i in 0..count {
+        let (s, r) = (spec.clone(), roots.to_vec());
+        set.spawn(async move {
+            (
+                i,
+                send_via_proxy(proxy, &r, &s)
+                    .await
+                    .map_err(|e| format!("{e:#}")),
+            )
+        });
+    }
+    let mut done = Vec::with_capacity(count);
+    while let Some(Ok(item)) = set.join_next().await {
+        done.push(item);
+    }
+    done.sort_by_key(|(i, _)| *i);
+    done.into_iter().map(|(_, r)| r).collect()
+}

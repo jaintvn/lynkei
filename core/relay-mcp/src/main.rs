@@ -11,6 +11,10 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
+mod prompts;
+mod resources;
+mod scenarios;
+
 use relay_model::rules::{Rule, RuleSet};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -30,6 +34,14 @@ fn default_data_dir() -> PathBuf {
     }
 }
 
+/// Where `relayd` is, and the way to push notifications to the client.
+pub struct Ctx {
+    pub socket: PathBuf,
+    pub data_dir: PathBuf,
+    out: tokio::sync::mpsc::UnboundedSender<Value>,
+    subs: std::sync::Mutex<std::collections::HashMap<String, tokio::task::JoinHandle<()>>>,
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -39,23 +51,45 @@ async fn main() -> Result<()> {
             .and_then(|i| args.get(i + 1))
             .cloned()
     };
-    let socket = match opt("--socket") {
-        Some(s) => PathBuf::from(s),
-        None => relay_control::default_socket(
-            &opt("--data-dir")
-                .map(PathBuf::from)
-                .unwrap_or_else(default_data_dir),
-        ),
+    let data_dir = opt("--data-dir")
+        .map(PathBuf::from)
+        .unwrap_or_else(default_data_dir);
+    let socket = opt("--socket")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| relay_control::default_socket(&data_dir));
+    let data_dir = if opt("--socket").is_some() && opt("--data-dir").is_none() {
+        socket.parent().map(PathBuf::from).unwrap_or(data_dir)
+    } else {
+        data_dir
     };
 
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
+    let ctx = std::sync::Arc::new(Ctx {
+        socket,
+        data_dir,
+        out: tx.clone(),
+        subs: Default::default(),
+    });
+
+    // One writer for replies and for notifications from watchers.
+    let writer = tokio::spawn(async move {
+        let mut out = tokio::io::stdout();
+        while let Some(v) = rx.recv().await {
+            if out.write_all(format!("{v}\n").as_bytes()).await.is_err()
+                || out.flush().await.is_err()
+            {
+                break;
+            }
+        }
+    });
+
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
-    let mut out = tokio::io::stdout();
     while let Some(line) = lines.next_line().await? {
         if line.trim().is_empty() {
             continue;
         }
         let reply = match serde_json::from_str::<Value>(&line) {
-            Ok(msg) => handle(&msg, &socket).await,
+            Ok(msg) => handle(&msg, &ctx).await,
             Err(e) => Some(error_reply(
                 Value::Null,
                 -32700,
@@ -63,10 +97,15 @@ async fn main() -> Result<()> {
             )),
         };
         if let Some(r) = reply {
-            out.write_all(format!("{r}\n").as_bytes()).await?;
-            out.flush().await?;
+            let _ = tx.send(r);
         }
     }
+    for (_, h) in ctx.subs.lock().unwrap().drain() {
+        h.abort();
+    }
+    drop(tx);
+    drop(ctx);
+    let _ = writer.await;
     Ok(())
 }
 
@@ -75,7 +114,8 @@ fn error_reply(id: Value, code: i64, message: &str) -> Value {
 }
 
 /// One incoming message; `None` for notifications (no reply).
-async fn handle(msg: &Value, socket: &std::path::Path) -> Option<Value> {
+async fn handle(msg: &Value, ctx: &Ctx) -> Option<Value> {
+    let socket = ctx.socket.as_path();
     let method = msg.get("method").and_then(Value::as_str)?;
     let id = msg.get("id").cloned();
     let params = msg.get("params").cloned().unwrap_or(Value::Null);
@@ -86,11 +126,51 @@ async fn handle(msg: &Value, socket: &std::path::Path) -> Option<Value> {
     let result = match method {
         "initialize" => json!({
             "protocolVersion": params.get("protocolVersion").and_then(Value::as_str).unwrap_or(PROTOCOL),
-            "capabilities": {"tools": {}},
+            "capabilities": {"tools": {}, "resources": {"subscribe": true}, "prompts": {}},
             "serverInfo": {"name": "relay", "version": env!("CARGO_PKG_VERSION")},
             "instructions": "Relay is a debugging proxy. Start with `status`; connect a device with `list_devices` and `connect_device`; read traffic with `search_traffic`; change behaviour with `add_rule`; handle held calls with `list_paused` and `resume_paused`."
         }),
         "ping" => json!({}),
+        "resources/list" => json!({"resources": resources::list()}),
+        "resources/templates/list" => json!({"resourceTemplates": resources::templates()}),
+        "resources/read" => match resources::read(
+            params.get("uri").and_then(Value::as_str).unwrap_or(""),
+            socket,
+        )
+        .await
+        {
+            Ok(text) => {
+                json!({"contents": [{"uri": params["uri"], "mimeType": "application/json", "text": text}]})
+            }
+            Err(e) => return Some(error_reply(id, -32002, &e)),
+        },
+        "resources/subscribe" => {
+            let uri = params
+                .get("uri")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            if !resources::known(&uri) {
+                return Some(error_reply(id, -32002, &format!("unknown resource {uri}")));
+            }
+            resources::subscribe(ctx, &uri);
+            json!({})
+        }
+        "resources/unsubscribe" => {
+            let uri = params.get("uri").and_then(Value::as_str).unwrap_or("");
+            if let Some(h) = ctx.subs.lock().unwrap().remove(uri) {
+                h.abort();
+            }
+            json!({})
+        }
+        "prompts/list" => json!({"prompts": prompts::list()}),
+        "prompts/get" => match prompts::get(
+            params.get("name").and_then(Value::as_str).unwrap_or(""),
+            params.get("arguments").unwrap_or(&Value::Null),
+        ) {
+            Some(p) => p,
+            None => return Some(error_reply(id, -32602, "unknown prompt")),
+        },
         "tools/list" => json!({"tools": tools()}),
         "tools/call" => {
             let name = params.get("name").and_then(Value::as_str).unwrap_or("");
@@ -98,7 +178,7 @@ async fn handle(msg: &Value, socket: &std::path::Path) -> Option<Value> {
                 .get("arguments")
                 .cloned()
                 .unwrap_or_else(|| json!({}));
-            match call_tool(name, &args, socket).await {
+            match call_tool(name, &args, ctx).await {
                 Ok(v) => {
                     json!({"content": [{"type": "text", "text": text_of(&v)}], "isError": false})
                 }
@@ -125,7 +205,7 @@ fn text_of(v: &Value) -> String {
     }
 }
 
-async fn rpc(socket: &std::path::Path, method: &str, params: Value) -> Result<Value, String> {
+pub async fn rpc(socket: &std::path::Path, method: &str, params: Value) -> Result<Value, String> {
     let mut c = relay_control::Client::connect(socket)
         .await
         .map_err(|e| format!("{e:#}"))?;
@@ -306,7 +386,7 @@ const SECRET_HEADERS: [&str; 6] = [
 ];
 
 /// Hides secret header values, drops bodies unless asked, and keeps long text short.
-fn slim(v: &mut Value, bodies: bool, secrets: bool) {
+pub fn slim(v: &mut Value, bodies: bool, secrets: bool) {
     match v {
         Value::Object(m) => {
             if !secrets
@@ -335,17 +415,18 @@ fn slim(v: &mut Value, bodies: bool, secrets: bool) {
     }
 }
 
-fn flag(a: &Value, k: &str) -> bool {
+pub fn flag(a: &Value, k: &str) -> bool {
     a.get(k).and_then(Value::as_bool).unwrap_or(false)
 }
 
-fn req<'a>(a: &'a Value, k: &str) -> Result<&'a Value, String> {
+pub fn req<'a>(a: &'a Value, k: &str) -> Result<&'a Value, String> {
     a.get(k)
         .filter(|v| !v.is_null())
         .ok_or_else(|| format!("`{k}` is required"))
 }
 
-async fn call_tool(name: &str, a: &Value, socket: &std::path::Path) -> Result<Value, String> {
+async fn call_tool(name: &str, a: &Value, ctx: &Ctx) -> Result<Value, String> {
+    let socket = ctx.socket.as_path();
     let pass = |keys: &[&str]| -> Value {
         let mut m = serde_json::Map::new();
         for k in keys {
@@ -386,6 +467,22 @@ async fn call_tool(name: &str, a: &Value, socket: &std::path::Path) -> Result<Va
         "clear_traffic" => rpc(socket, "traffic.clear", Value::Null).await,
         "list_rules" => rpc(socket, "rules.get", Value::Null).await,
         "add_rule" | "toggle_rule" | "delete_rule" => edit_rules(name, a, socket).await,
+        "send_request" => {
+            let mut r = rpc(
+                socket,
+                "compose.send",
+                pass(&["method", "url", "headers", "body", "count", "parallel"]),
+            )
+            .await?;
+            slim(&mut r, true, flag(a, "include_secrets"));
+            Ok(r)
+        }
+        "repeat_request" => scenarios::repeat(a, ctx).await,
+        "record_scenario" => scenarios::record(a, ctx).await,
+        "list_scenarios" => scenarios::list(ctx),
+        "replay_scenario" => scenarios::replay(a, ctx).await,
+        "stop_scenario" => scenarios::stop(a, ctx).await,
+        "delete_scenario" => scenarios::delete(a, ctx).await,
         "get_settings" => rpc(socket, "settings.get", Value::Null).await,
         "set_ssl_decrypt" => {
             rpc(
@@ -417,7 +514,7 @@ async fn call_tool(name: &str, a: &Value, socket: &std::path::Path) -> Result<Va
 }
 
 /// add / toggle / delete work on the whole rules file: read it, change it, validate and save it.
-async fn edit_rules(name: &str, a: &Value, socket: &std::path::Path) -> Result<Value, String> {
+pub async fn edit_rules(name: &str, a: &Value, socket: &std::path::Path) -> Result<Value, String> {
     let current = rpc(socket, "rules.get", Value::Null).await?;
     let yaml = current.get("yaml").and_then(Value::as_str).unwrap_or("");
     let mut set = if yaml.trim().is_empty() {
@@ -458,9 +555,19 @@ async fn edit_rules(name: &str, a: &Value, socket: &std::path::Path) -> Result<V
 mod tests {
     use super::*;
 
+    fn test_ctx(sock: &str) -> Ctx {
+        let (out, _rx) = tokio::sync::mpsc::unbounded_channel();
+        Ctx {
+            socket: sock.into(),
+            data_dir: "/nonexistent".into(),
+            out,
+            subs: Default::default(),
+        }
+    }
+
     #[tokio::test]
     async fn initialize_and_list_tools() {
-        let sock = std::path::Path::new("/nonexistent");
+        let sock = &test_ctx("/nonexistent");
         let r = handle(&json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26"}}), sock).await.unwrap();
         assert_eq!(r["result"]["protocolVersion"], "2025-03-26");
         assert_eq!(r["result"]["serverInfo"]["name"], "relay");
@@ -490,7 +597,7 @@ mod tests {
 
     #[tokio::test]
     async fn unreachable_daemon_is_a_tool_error_not_a_crash() {
-        let r = handle(&json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"status","arguments":{}}}), std::path::Path::new("/nonexistent/relayd.sock")).await.unwrap();
+        let r = handle(&json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"status","arguments":{}}}), &test_ctx("/nonexistent/relayd.sock")).await.unwrap();
         assert_eq!(r["result"]["isError"], true);
         assert!(
             r["result"]["content"][0]["text"]

@@ -259,6 +259,76 @@ impl Engine {
                     )),
                 }
             }
+            "compose.send" => {
+                // Sends a request through the running proxy, so it shows in the list and rules apply.
+                let (addr, pem) = {
+                    let guard = self.proxy.lock().await;
+                    let h = guard
+                        .as_ref()
+                        .ok_or_else(|| RpcError::new(RpcError::ENGINE, "start the proxy first"))?;
+                    (h.local_addr, h.ca_pem().to_owned())
+                };
+                let addr = SocketAddr::from(([127, 0, 0, 1], addr.port()));
+                let text = |k: &str| params.get(k).and_then(Value::as_str).unwrap_or("");
+                let url = text("url").to_string();
+                if url.is_empty() {
+                    return Err(bad("`url` is required"));
+                }
+                let method = match text("method") {
+                    "" => "GET".to_string(),
+                    m => m.to_uppercase(),
+                };
+                let mut headers = Vec::new();
+                match params.get("headers") {
+                    Some(Value::Array(a)) => {
+                        for h in a {
+                            if let (Some(n), Some(v)) = (
+                                h.get("name").and_then(Value::as_str),
+                                h.get("value").and_then(Value::as_str),
+                            ) {
+                                headers.push((n.to_string(), v.to_string()));
+                            }
+                        }
+                    }
+                    Some(Value::Object(m)) => {
+                        for (n, v) in m {
+                            if let Some(v) = v.as_str() {
+                                headers.push((n.clone(), v.to_string()));
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                let spec = relay_proxy::compose::ComposeRequest {
+                    method,
+                    url,
+                    headers,
+                    body: text("body").as_bytes().to_vec(),
+                };
+                let count = params.get("count").and_then(Value::as_u64).unwrap_or(1) as usize;
+                let parallel = params
+                    .get("parallel")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let roots = relay_proxy::compose::roots_from_pem(&pem);
+                let results =
+                    relay_proxy::compose::send_many(addr, &roots, &spec, count, parallel).await;
+                Ok(Value::Array(
+                    results
+                        .into_iter()
+                        .map(|r| match r {
+                            Ok(r) => json!({
+                                "status": r.status,
+                                "headers": r.headers.iter().map(|(n, v)| json!({"name": n, "value": v})).collect::<Vec<_>>(),
+                                "body_preview": r.body_preview,
+                                "body_size": r.body_size,
+                                "duration_ms": r.duration_ms,
+                            }),
+                            Err(e) => json!({"status": 0, "error": e}),
+                        })
+                        .collect(),
+                ))
+            }
             "traffic.clear" => {
                 self.flush();
                 self.store.clear().map_err(engine_err)?;

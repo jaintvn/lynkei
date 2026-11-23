@@ -496,3 +496,31 @@ async fn decrypt_and_throttle_switches_work_through_the_api() {
     get(port, &url).await;
     assert!(t0.elapsed() < Duration::from_millis(600));
 }
+
+#[tokio::test]
+async fn compose_sends_through_the_proxy_so_it_shows_in_traffic() {
+    let (_engine, mut c, _proxy, _dir, _) = setup("compose").await;
+    let o = origin().await;
+    let r = c
+        .call(
+            "compose.send",
+            json!({"method": "post", "url": format!("http://127.0.0.1:{o}/v2/cart"), "headers": {"x-test": "1"}, "body": "{}", "count": 3, "parallel": true}),
+        )
+        .await
+        .unwrap();
+    let r = r.as_array().unwrap();
+    assert_eq!(r.len(), 3);
+    assert!(r.iter().all(|x| x["status"] == 200));
+    assert_eq!(r[0]["body_preview"], "hello from /v2/cart");
+    let seen = c
+        .call(
+            "traffic.search",
+            json!({"query": "method:POST path:/v2/cart"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(seen.as_array().unwrap().len(), 3);
+
+    let bad = c.call("compose.send", json!({"method": "GET"})).await;
+    assert!(bad.is_err(), "url is required");
+}

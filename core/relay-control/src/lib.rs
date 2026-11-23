@@ -11,6 +11,7 @@
 //! | `traffic.search` | `{query?, limit?}` | `[{key, session, transaction}]` newest first |
 //! | `traffic.get` | `{key}` | `{key, session, transaction}` |
 //! | `traffic.clear` | – | `{}` |
+//! | `compose.send` | `{method?, url, headers?, body?, count?, parallel?}` | `[{status, headers, body_preview, body_size, duration_ms}]` or `{status: 0, error}` per request. Goes through the running proxy, so it shows in traffic and rules apply |
 //! | `traffic.subscribe` | `{query?}` | `{}`, then `traffic.event` notifications `{transaction}` |
 //! | `rules.get` | – | `{yaml, problems}` |
 //! | `rules.set` | `{yaml}` | `{saved, problems}` (saved only when valid) |

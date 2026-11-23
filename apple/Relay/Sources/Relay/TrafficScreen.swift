@@ -8,6 +8,8 @@ struct TrafficScreen: View {
     @Environment(Sheets.self) private var sheets
     @Binding var screen: Screen
 
+    @AppStorage("trafficGrouped") private var grouped = false
+    @State private var openGroups: Set<String> = []
     @State private var statusFilter = "all"
     @State private var methodFilter: String?
     @State private var typeFilter: String?
@@ -262,23 +264,67 @@ struct TrafficScreen: View {
                 ScrollViewReader { proxy in
                     ScrollView {
                         LazyVStack(spacing: 0) {
-                            ForEach(shown) { tx in
-                                TrafficRow(tx: tx, selected: tx.id == store.selection, kinds: tx.appliedRules.map { store.ruleKind($0) })
-                                    .contentShape(Rectangle())
-                                    .onTapGesture { store.selection = tx.id }
-                                    .contextMenu { ruleMenu(for: tx) }
-                                    .id(tx.id)
+                            if grouped {
+                                ForEach(callGroups(shown)) { g in groupView(g) }
+                            } else {
+                                ForEach(shown) { tx in callRow(tx) }
                             }
                         }
                     }
                     .onChange(of: store.transactions.count) {
-                        if store.selection == nil, let last = shown.last { proxy.scrollTo(last.id, anchor: .bottom) }
+                        if !grouped, store.selection == nil, let last = shown.last { proxy.scrollTo(last.id, anchor: .bottom) }
                     }
                 }
             }
             footer(shown: shown.count)
         }
         .frame(maxWidth: .infinity)
+    }
+
+    // MARK: Grouping
+
+    private struct CallGroup: Identifiable {
+        let id: String
+        var calls: [FfiTransaction]
+    }
+
+    /// Calls to the same endpoint (method, host and path with IDs folded), in order of first appearance.
+    private func callGroups(_ rows: [FfiTransaction]) -> [CallGroup] {
+        var order: [String] = []
+        var map: [String: [FfiTransaction]] = [:]
+        for t in rows {
+            let k = Analytics.endpointKey(t)
+            if map[k] == nil { order.append(k) }
+            map[k, default: []].append(t)
+        }
+        return order.map { CallGroup(id: $0, calls: map[$0] ?? []) }
+    }
+
+    private func callRow(_ tx: FfiTransaction, indent: CGFloat = 0) -> some View {
+        TrafficRow(tx: tx, selected: tx.id == store.selection, kinds: tx.appliedRules.map { store.ruleKind($0) })
+            .padding(.leading, indent)
+            .contentShape(Rectangle())
+            .onTapGesture { store.selection = tx.id }
+            .contextMenu { ruleMenu(for: tx) }
+            .id(tx.id)
+    }
+
+    @ViewBuilder
+    private func groupView(_ g: CallGroup) -> some View {
+        if g.calls.count == 1, let only = g.calls.first {
+            callRow(only)
+        } else {
+            let open = openGroups.contains(g.id)
+            GroupHeader(calls: g.calls, open: open, kinds: g.calls.flatMap { $0.appliedRules.map { store.ruleKind($0) } })
+                .contentShape(Rectangle())
+                .onTapGesture { if open { openGroups.remove(g.id) } else { openGroups.insert(g.id) } }
+            if open { ForEach(g.calls.reversed()) { callRow($0, indent: 18) } }
+        }
+    }
+
+    private var viewSwitch: some View {
+        PillGroup(items: [false, true], title: { $0 ? "Grouped" : "List" }, selection: $grouped, height: 24)
+            .help("Group calls to the same endpoint, or list every call")
     }
 
     private var chips: some View {
@@ -316,6 +362,7 @@ struct TrafficScreen: View {
             facet("Type", value: typeFilter, options: Array(Set(list.map(Analytics.typeBadge))).filter { !$0.isEmpty }.sorted()) { typeFilter = $0 }
             facet("Device", value: deviceFilter, options: Array(Set(list.map(Analytics.deviceLabel))).sorted()) { deviceFilter = $0 }
             facet("API version", value: versionFilter, options: Array(Set(list.compactMap { Analytics.apiVersion($0.path) })).sorted()) { versionFilter = $0 }
+            viewSwitch
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
@@ -680,5 +727,73 @@ struct TrafficSidebar: View {
                 .padding(.horizontal, 8).padding(.vertical, 5)
             }
         }
+    }
+}
+
+// MARK: - Group header
+
+/// One row standing for several calls to the same endpoint: how many, the worst outcome, the
+/// average time and the total size. Click to open or close the calls inside.
+struct GroupHeader: View {
+    let calls: [FfiTransaction]
+    let open: Bool
+    var kinds: [String] = []
+
+    private var rep: FfiTransaction {
+        func rank(_ t: FfiTransaction) -> Int {
+            if t.state == .failed { return 4 }
+            let s = Int(t.status ?? 0) / 100
+            return s >= 5 ? 3 : s == 4 ? 2 : 0
+        }
+        return calls.max { rank($0) < rank($1) || (rank($0) == rank($1) && $0.id < $1.id) } ?? calls[0]
+    }
+
+    var body: some View {
+        let first = calls[0]
+        let timed = calls.map(\.durationMs).filter { $0 > 0 }
+        let avg = timed.isEmpty ? 0 : timed.reduce(0, +) / UInt64(timed.count)
+        let failing = calls.filter { $0.state == .failed || ($0.status ?? 0) >= 400 }.count
+        HStack(spacing: 8) {
+            StatusPill(tx: rep).frame(width: 52, alignment: .leading)
+            Text(first.method)
+                .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
+                .foregroundStyle(methodColor(first.method)).frame(width: 58, alignment: .leading)
+            HStack(spacing: 8) {
+                Image(systemName: open ? "chevron.down" : "chevron.right")
+                    .font(.system(size: 9, weight: .bold)).foregroundStyle(Theme.muted).frame(width: 10)
+                Text("×\(calls.count)")
+                    .font(.system(size: 10.5, weight: .bold, design: .monospaced))
+                    .foregroundStyle(Theme.accent)
+                    .padding(.horizontal, 6).padding(.vertical, 1)
+                    .background(Capsule().fill(Theme.selection))
+                Text(first.state == .tunneled ? "\(first.host):\(first.port)" : Analytics.foldPath(first.path))
+                    .font(.system(size: 12, weight: .medium, design: .monospaced))
+                    .lineLimit(1).truncationMode(.middle)
+                if failing > 0 {
+                    Text("\(failing) failed").font(.system(size: 10.5)).foregroundStyle(Theme.s5xx).lineLimit(1)
+                }
+            }
+            .frame(minWidth: 150, maxWidth: .infinity, alignment: .leading)
+            Text(first.host).font(.system(size: 12)).foregroundStyle(Theme.muted)
+                .lineLimit(1).truncationMode(.middle).frame(minWidth: 90, maxWidth: 150, alignment: .leading)
+            HStack(spacing: 4) {
+                PlatformIcon(platform: Analytics.platform(ofDevice: Analytics.deviceLabel(first)), size: 10)
+                Text(Analytics.deviceLabel(first)).font(.system(size: 12)).foregroundStyle(Theme.muted).lineLimit(1)
+            }
+            .frame(width: 70, alignment: .leading)
+            DurationBar(ms: avg).frame(width: 104)
+            let total = calls.reduce(0) { $0 + $1.responseBodySize }
+            Text(total == 0 ? "—" : formatBytes(total))
+                .font(.system(size: 11.5, design: .monospaced)).foregroundStyle(Theme.muted).lineLimit(1)
+                .frame(width: 58, alignment: .trailing)
+            Group {
+                if let kind = Array(Set(kinds.filter { !$0.isEmpty })).sorted().first { RuleLetter(kind: kind) } else { Color.clear }
+            }
+            .frame(width: 26)
+        }
+        .padding(.horizontal, 14)
+        .frame(height: 32)
+        .background(Theme.raised.opacity(0.5))
+        .overlay(alignment: .bottom) { Rectangle().fill(Theme.line).frame(height: 1) }
     }
 }

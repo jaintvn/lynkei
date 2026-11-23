@@ -19,6 +19,9 @@ struct ConnectView: View {
                         ForEach(devices.devices, id: \.id) { d in
                             DeviceCard(device: d, store: devices, trafficSeen: trafficSeen(after: devices.results[d.id]?.connectedAtMs))
                         }
+                        ForEach(NetworkClient.detect(from: traffic.transactions)) { client in
+                            NetworkClientCard(client: client)
+                        }
                         WifiCard(url: devices.wifiURL, trafficSeen: false)
                     }
                     .padding(24)
@@ -160,6 +163,39 @@ struct DeviceCard: View {
         case "android_emulator": return "ANDROID EMULATOR"
         default: return "ANDROID OVER USB"
         }
+    }
+}
+
+/// A device Relay found by its traffic (e.g. an iPhone on Wi-Fi), with the same checklist as the others.
+struct NetworkClientCard: View {
+    let client: NetworkClient
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 12) {
+                Image(systemName: client.kind == .android ? "iphone.gen3" : "iphone")
+                    .font(.system(size: 18))
+                    .frame(width: 40, height: 40)
+                    .background(RoundedRectangle(cornerRadius: 10).fill(Theme.panel))
+                    .overlay(RoundedRectangle(cornerRadius: 10).stroke(Theme.line))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("FOUND ON YOUR WI-FI").font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.faint)
+                    Text(client.title).font(.system(size: 15, weight: .semibold))
+                    Text(client.ip).font(.system(size: 12, design: .monospaced)).foregroundStyle(Theme.muted)
+                }
+            }
+            VStack(alignment: .leading, spacing: 8) {
+                ChecklistRow(title: "Proxy", step: client.proxyStep, busy: false)
+                ChecklistRow(title: "Certificate trusted", step: client.certificateStep, busy: false)
+                ChecklistRow(title: "Traffic seen", step: client.trafficStep, busy: false)
+            }
+            Text("\(client.requests) requests · \(client.decrypted) decrypted · \(client.tunneled) passed through")
+                .font(.system(size: 11.5))
+                .foregroundStyle(Theme.muted)
+        }
+        .padding(18)
+        .background(RoundedRectangle(cornerRadius: 14).fill(Theme.raised))
+        .overlay(RoundedRectangle(cornerRadius: 14).stroke(Theme.accent.opacity(0.55)))
     }
 }
 

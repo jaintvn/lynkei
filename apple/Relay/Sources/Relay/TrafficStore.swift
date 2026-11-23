@@ -69,6 +69,15 @@ final class TrafficStore {
         _ = try engine.addMapLocalRule(request: tx, file: file, status: status)
         refreshRules()
     }
+    /// Creates or updates a rewrite rule (empty id = new). Returns its id.
+    func saveRewrite(_ rule: FfiRewriteRule) throws -> String {
+        guard let engine else { throw NSError(domain: "Relay", code: 1, userInfo: [NSLocalizedDescriptionKey: "Start Relay first"]) }
+        let id = try engine.saveRewriteRule(rule: rule)
+        refreshRules()
+        return id
+    }
+    func rewriteRule(_ id: String) -> FfiRewriteRule? { try? engine?.getRewriteRule(id: id) }
+
     func addDnsSpoof(host: String, to: String) throws {
         guard let engine else { return }
         _ = try engine.addDnsSpoofRule(host: host, to: to)

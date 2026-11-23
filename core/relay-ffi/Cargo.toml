@@ -22,6 +22,7 @@ relay-netstack = { version = "0.1.0", path = "../relay-netstack" }
 relay-proxy = { version = "0.1.0", path = "../relay-proxy" }
 relay-store = { version = "0.1.0", path = "../relay-store" }
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std"] }
+serde_json = "1.0.154"
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = ["rt-multi-thread"] }
 uniffi = { version = "0.32.2", features = ["cli"] }

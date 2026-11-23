@@ -378,6 +378,134 @@ fn checked_file(path: &str) -> Result<String, RelayError> {
     }
 }
 
+fn ffi_rule(r: &relay_model::rules::Rule) -> FfiRule {
+    FfiRule {
+        id: r.id.clone(),
+        name: r.name.clone(),
+        enabled: r.enabled,
+        kind: rule_kind(&r.action).into(),
+        summary: rule_summary(r),
+        file: rule_file(&r.action).0,
+        status: rule_file(&r.action).1,
+        detail: rule_detail(&r.action),
+    }
+}
+
+fn step_from(a: &relay_model::rules::RewriteAction) -> FfiRewriteStep {
+    use relay_model::rules::RewriteAction::*;
+    let blank = |kind: &str| FfiRewriteStep {
+        kind: kind.into(),
+        name: String::new(),
+        value: String::new(),
+        path: String::new(),
+        find: String::new(),
+        replace: String::new(),
+        regex: false,
+    };
+    match a {
+        SetJson { path, value } => FfiRewriteStep {
+            path: path.clone(),
+            value: value.to_string(),
+            ..blank("set_json")
+        },
+        RemoveJson { path } => FfiRewriteStep {
+            path: path.clone(),
+            ..blank("remove_json")
+        },
+        SetHeader { name, value } => FfiRewriteStep {
+            name: name.clone(),
+            value: value.clone(),
+            ..blank("set_header")
+        },
+        RemoveHeader { name } => FfiRewriteStep {
+            name: name.clone(),
+            ..blank("remove_header")
+        },
+        SetStatus(s) => FfiRewriteStep {
+            value: s.to_string(),
+            ..blank("set_status")
+        },
+        ReplaceBody {
+            find,
+            replace,
+            regex,
+        } => FfiRewriteStep {
+            find: find.clone(),
+            replace: replace.clone(),
+            regex: *regex,
+            ..blank("replace_body")
+        },
+        DelayMs(ms) => FfiRewriteStep {
+            value: ms.to_string(),
+            ..blank("delay")
+        },
+    }
+}
+
+fn step_to(s: &FfiRewriteStep) -> Result<relay_model::rules::RewriteAction, String> {
+    use relay_model::rules::RewriteAction::*;
+    let num = |what: &str| -> Result<u64, String> {
+        s.value
+            .trim()
+            .parse::<u64>()
+            .map_err(|_| format!("{what} must be a whole number, not `{}`", s.value))
+    };
+    Ok(match s.kind.as_str() {
+        "set_json" => SetJson {
+            path: s.path.trim().to_owned(),
+            // Anything that is not valid JSON (a bare word) is taken as text.
+            value: serde_json::from_str(s.value.trim())
+                .unwrap_or_else(|_| serde_json::Value::String(s.value.clone())),
+        },
+        "remove_json" => RemoveJson {
+            path: s.path.trim().to_owned(),
+        },
+        "set_header" => SetHeader {
+            name: s.name.trim().to_owned(),
+            value: s.value.clone(),
+        },
+        "remove_header" => RemoveHeader {
+            name: s.name.trim().to_owned(),
+        },
+        "set_status" => SetStatus(num("status")? as u16),
+        "replace_body" => ReplaceBody {
+            find: s.find.clone(),
+            replace: s.replace.clone(),
+            regex: s.regex,
+        },
+        "delay" => DelayMs(num("delay")?),
+        other => return Err(format!("unknown edit `{other}`")),
+    })
+}
+
+fn rule_detail(a: &relay_model::rules::RuleAction) -> String {
+    use relay_model::rules::{Phase, RuleAction};
+    let RuleAction::Rewrite { phase, actions } = a else {
+        return String::new();
+    };
+    let side = match phase {
+        Phase::Request => "request",
+        Phase::Response => "response",
+        Phase::Both => "request and response",
+    };
+    let steps: Vec<String> = actions
+        .iter()
+        .map(|a| {
+            let s = step_from(a);
+            match s.kind.as_str() {
+                "set_header" => format!("set header {} = {}", s.name, s.value),
+                "remove_header" => format!("remove header {}", s.name),
+                "set_status" => format!("status {}", s.value),
+                "set_json" => format!("set {} = {}", s.path, s.value),
+                "remove_json" => format!("remove {}", s.path),
+                "replace_body" => format!("replace “{}” with “{}”", s.find, s.replace),
+                _ => format!("delay {} ms", s.value),
+            }
+        })
+        .collect();
+    format!("{side}: {}", steps.join("; "))
+}
+
 fn rule_summary(r: &relay_model::rules::Rule) -> String {
     let m = &r.matcher;
     if let relay_model::rules::RuleAction::DnsSpoof { to } = &r.action {
@@ -414,6 +542,40 @@ pub struct FfiRule {
     /// The file a `map local` rule answers from (empty for other kinds).
     pub file: String,
     pub status: u16,
+    /// For `rewrite` rules, what it changes, e.g. `response: set header x-env = staging; set $.price = 99`.
+    pub detail: String,
+}
+
+/// One edit a rewrite rule makes. `kind` is `set_header`, `remove_header`, `set_status`,
+/// `set_json`, `remove_json`, `replace_body` or `delay`; only the fields that kind uses matter.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiRewriteStep {
+    pub kind: String,
+    /// Header name.
+    pub name: String,
+    /// Header value, a status code, a delay in ms, or (set_json) the JSON text of the new value.
+    pub value: String,
+    /// JSON path, e.g. `$.items[0].price`.
+    pub path: String,
+    pub find: String,
+    pub replace: String,
+    pub regex: bool,
+}
+
+/// A rewrite rule in editable form (what the Mac app's Rewrite editor works with).
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiRewriteRule {
+    /// Empty for a new rule.
+    pub id: String,
+    pub name: String,
+    pub enabled: bool,
+    /// Match only this method / host / path prefix (empty = any).
+    pub method: String,
+    pub host: String,
+    pub path: String,
+    /// `request`, `response` or `both`.
+    pub phase: String,
+    pub steps: Vec<FfiRewriteStep>,
 }
 
 /// A request or response held at a breakpoint.
@@ -921,19 +1083,7 @@ impl RelayEngine {
     }
 
     pub fn list_rules(&self) -> Vec<FfiRule> {
-        self.current_rules()
-            .rules
-            .iter()
-            .map(|r| FfiRule {
-                id: r.id.clone(),
-                name: r.name.clone(),
-                enabled: r.enabled,
-                kind: rule_kind(&r.action).into(),
-                summary: rule_summary(r),
-                file: rule_file(&r.action).0,
-                status: rule_file(&r.action).1,
-            })
-            .collect()
+        self.current_rules().rules.iter().map(ffi_rule).collect()
     }
 
     /// Every rule whose match fits this request, switched on or off (so the UI can show which
@@ -950,15 +1100,7 @@ impl RelayEngine {
                         relay_model::filter::Filter::parse(f).is_ok_and(|f| f.matches(&t))
                     })
             })
-            .map(|r| FfiRule {
-                id: r.id.clone(),
-                name: r.name.clone(),
-                enabled: r.enabled,
-                kind: rule_kind(&r.action).into(),
-                summary: rule_summary(r),
-                file: rule_file(&r.action).0,
-                status: rule_file(&r.action).1,
-            })
+            .map(ffi_rule)
             .collect()
     }
 
@@ -1013,6 +1155,109 @@ impl RelayEngine {
         }
         self.save_rules(set, None)
             .map_err(|reason| RelayError::Failed { reason })?;
+        Ok(id)
+    }
+
+    /// A rewrite rule in editable form.
+    pub fn get_rewrite_rule(&self, id: String) -> Result<FfiRewriteRule, RelayError> {
+        use relay_model::rules::{Phase, RuleAction};
+        let set = self.current_rules();
+        let r = set
+            .rules
+            .iter()
+            .find(|r| r.id == id)
+            .ok_or_else(|| RelayError::Failed {
+                reason: format!("no rule `{id}`"),
+            })?;
+        let RuleAction::Rewrite { phase, actions } = &r.action else {
+            return Err(RelayError::Failed {
+                reason: format!("`{id}` is not a rewrite rule"),
+            });
+        };
+        Ok(FfiRewriteRule {
+            id: r.id.clone(),
+            name: r.name.clone(),
+            enabled: r.enabled,
+            method: r.matcher.method.clone().unwrap_or_default(),
+            host: r.matcher.host.clone().unwrap_or_default(),
+            path: r.matcher.path.clone().unwrap_or_default(),
+            phase: match phase {
+                Phase::Request => "request",
+                Phase::Response => "response",
+                Phase::Both => "both",
+            }
+            .into(),
+            steps: actions.iter().map(step_from).collect(),
+        })
+    }
+
+    /// Creates a rewrite rule (empty `id`) or replaces the one with that id, and applies it live.
+    /// Returns the rule's id. Problems (empty match, bad JSON path, …) come back as an error.
+    pub fn save_rewrite_rule(&self, rule: FfiRewriteRule) -> Result<String, RelayError> {
+        use relay_model::rules::{Matcher, Phase, Rule, RuleAction};
+        let fail = |reason: String| RelayError::Failed { reason };
+        let clean = |s: &str| {
+            let t = s.trim();
+            (!t.is_empty()).then(|| t.to_owned())
+        };
+        let phase = match rule.phase.as_str() {
+            "request" => Phase::Request,
+            "response" => Phase::Response,
+            "both" => Phase::Both,
+            other => {
+                return Err(fail(format!(
+                    "phase must be request, response or both, not `{other}`"
+                )));
+            }
+        };
+        let actions = rule
+            .steps
+            .iter()
+            .map(step_to)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(fail)?;
+        let mut set = self.current_rules();
+        let id = if rule.id.is_empty() {
+            let host = if rule.host.trim().is_empty() {
+                "any"
+            } else {
+                rule.host.trim()
+            };
+            unique_rule_id(&set, "rewrite", host)
+        } else {
+            rule.id.clone()
+        };
+        let new = Rule {
+            id: id.clone(),
+            name: rule.name.trim().to_owned(),
+            enabled: rule.enabled,
+            matcher: Matcher {
+                method: clean(&rule.method),
+                host: clean(&rule.host),
+                path: clean(&rule.path),
+                ..Default::default()
+            },
+            action: RuleAction::Rewrite { phase, actions },
+        };
+        match set.rules.iter().position(|r| r.id == id) {
+            Some(i) => {
+                // Keep a matcher scheme/filter the editor does not show.
+                let old = &set.rules[i].matcher;
+                let mut m = new.matcher.clone();
+                m.scheme = old.scheme.clone();
+                m.filter = old.filter.clone();
+                set.rules[i] = Rule { matcher: m, ..new };
+            }
+            None => set.rules.push(new),
+        }
+        if let Some(p) = set
+            .validate()
+            .into_iter()
+            .find(|p| p.rule.as_deref() == Some(&id))
+        {
+            return Err(fail(p.message));
+        }
+        self.save_rules(set, None).map_err(fail)?;
         Ok(id)
     }
 
@@ -1382,6 +1627,96 @@ mod tests {
         assert_eq!(r.kind, "dns spoof");
         assert_eq!(r.summary, "api.acme.com → 127.0.0.1");
     }
+    #[test]
+    fn rewrite_rules_are_created_edited_and_validated() {
+        let dir = std::env::temp_dir().join(format!("relay-ffi-rewrite-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let engine = RelayEngine::new(dir.to_string_lossy().into()).unwrap();
+        let step = |kind: &str| FfiRewriteStep {
+            kind: kind.into(),
+            name: String::new(),
+            value: String::new(),
+            path: String::new(),
+            find: String::new(),
+            replace: String::new(),
+            regex: false,
+        };
+        let rule = FfiRewriteRule {
+            id: String::new(),
+            name: "Cheaper shoes".into(),
+            enabled: true,
+            method: "GET".into(),
+            host: "api.acme.com".into(),
+            path: "/v2/products".into(),
+            phase: "response".into(),
+            steps: vec![
+                FfiRewriteStep {
+                    name: "x-env".into(),
+                    value: "staging".into(),
+                    ..step("set_header")
+                },
+                FfiRewriteStep {
+                    path: "$.items[0].price".into(),
+                    value: "99.5".into(),
+                    ..step("set_json")
+                },
+                FfiRewriteStep {
+                    path: "$.items[0].name".into(),
+                    value: "Trail Runner".into(),
+                    ..step("set_json")
+                },
+                FfiRewriteStep {
+                    value: "503".into(),
+                    ..step("set_status")
+                },
+            ],
+        };
+        let id = engine.save_rewrite_rule(rule.clone()).unwrap();
+        let listed = engine
+            .list_rules()
+            .into_iter()
+            .find(|r| r.id == id)
+            .unwrap();
+        assert_eq!(listed.kind, "rewrite");
+        assert!(
+            listed
+                .detail
+                .starts_with("response: set header x-env = staging; set $.items[0].price = 99.5"),
+            "{}",
+            listed.detail
+        );
+        // Bare words become text, numbers stay numbers.
+        let back = engine.get_rewrite_rule(id.clone()).unwrap();
+        assert_eq!(back.steps[1].value, "99.5");
+        assert_eq!(back.steps[2].value, "\"Trail Runner\"");
+
+        // Edit in place: same id, new value, turned off.
+        let mut edited = back.clone();
+        edited.enabled = false;
+        edited.steps[0].value = "prod".into();
+        assert_eq!(engine.save_rewrite_rule(edited).unwrap(), id);
+        let now = engine.get_rewrite_rule(id.clone()).unwrap();
+        assert!(!now.enabled);
+        assert_eq!(now.steps[0].value, "prod");
+        assert_eq!(engine.list_rules().len(), 1);
+
+        // Problems are reported, nothing is saved.
+        let mut bad = rule.clone();
+        bad.host = String::new();
+        bad.path = String::new();
+        bad.method = String::new();
+        assert!(engine.save_rewrite_rule(bad).is_err());
+        let mut bad = rule.clone();
+        bad.steps = vec![FfiRewriteStep {
+            value: "abc".into(),
+            ..step("set_status")
+        }];
+        assert!(engine.save_rewrite_rule(bad).is_err());
+        assert_eq!(engine.list_rules().len(), 1);
+        assert!(engine.get_rewrite_rule("nope".into()).is_err());
+    }
+
     #[test]
     fn island_switches_are_remembered_and_validated() {
         let dir = std::env::temp_dir().join(format!("relay-ffi-switch-{}", std::process::id()));

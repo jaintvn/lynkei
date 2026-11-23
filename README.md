@@ -135,6 +135,16 @@ A small black pill hugs the notch (a floating pill at top-centre on Macs without
 
 From a terminal or script (with `relayd` running): `relay decrypt on|off` and `relay throttle 3g|edge|lte|lte-lossy|high-latency|offline|off` (no argument shows the current setting). Over the control API they are `settings.get` and `settings.set {decrypt?, throttle?}`; a bad value changes nothing, and the settings survive a proxy restart but reset when `relayd` exits.
 
+## Rewrite rules (change a call's request or response)
+
+Like Charles' Rewrite, but point-and-click. Right-click any call and choose **Rewrite this call…**. The sheet is filled in with that call's method, host and path. Use **Add change** to pick what to change:
+
+- **Set header** or **Remove header**: pick from the call's own headers (or add a new one) and edit the value.
+- **Edit JSON field** or **Remove JSON field**: pick a field from the call's JSON body (shown with its current value), then type the new value (text, a number, `true`, `null`…).
+- **Replace text in the body** (plain or regex), **Change status code** and **Delay the response**.
+
+Changes are grouped under **Request** and **Response** tabs. **Save rule** applies it straight away to live traffic. In **Rules** (toolbar) every rewrite shows what it does, has an on/off switch, and **Edit…** reopens the same sheet to change values or add and remove changes; **New rewrite…** starts one from scratch. Underneath it is the same `rules.yaml` as before, so it also works from the CLI and API.
+
 ## Compose and Repeat
 
 **Compose** (toolbar) sends a request you write; **Repeat** and **Edit & Repeat…** in a request's right-click menu resend a captured one, optionally edited. You can send it up to 200 times, one by one or all at once, which is handy for retry and race checks. The requests go through Relay, so they show up in the list and your rules and breakpoints apply to them. Only the text of a captured body is copied, so a binary or very large body needs to be pasted in.

@@ -8,12 +8,14 @@ struct RulesView: View {
     @State private var showYAML = false
     @State private var yaml = ""
     @State private var problems: [String] = []
+    @State private var editing: RewriteDraft?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Text("Rules").font(.system(size: 16, weight: .semibold))
                 Spacer()
+                Button("New rewrite…") { editing = RewriteDraft() }
                 Button(showYAML ? "Show list" : "Edit YAML") {
                     if !showYAML { yaml = store.rulesYAML() }
                     problems = []
@@ -27,6 +29,7 @@ struct RulesView: View {
         .frame(width: 640, height: 480)
         .background(Theme.panel)
         .onAppear { store.refreshRules() }
+        .sheet(item: $editing) { RewriteView(draft: $0) }
     }
 
     private var list: some View {
@@ -34,7 +37,7 @@ struct RulesView: View {
             if store.rules.isEmpty {
                 VStack(spacing: 6) {
                     Text("No rules yet").font(.system(size: 14, weight: .medium))
-                    Text("Right-click a request and choose Block, Breakpoint, Throttle or Map local, or write rules as YAML.")
+                    Text("Right-click a request and choose Rewrite, Block, Breakpoint, Throttle or Map local, or write rules as YAML.")
                         .font(.system(size: 12)).foregroundStyle(Theme.muted).multilineTextAlignment(.center)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -54,8 +57,17 @@ struct RulesView: View {
                                     Text(r.name.isEmpty ? r.id : r.name).font(.system(size: 13))
                                     Text(r.summary).font(Theme.mono).foregroundStyle(Theme.muted).lineLimit(1)
                                     if r.kind == "map local" { MapLocalFile(rule: r) }
+                                    if r.kind == "rewrite", !r.detail.isEmpty {
+                                        Text(r.detail).font(.system(size: 11.5)).foregroundStyle(Theme.faint).lineLimit(2)
+                                    }
                                 }
                                 Spacer()
+                                if r.kind == "rewrite" {
+                                    Button("Edit…") {
+                                        if let rule = store.rewriteRule(r.id) { editing = RewriteDraft(rule: rule) }
+                                    }
+                                    .controlSize(.small)
+                                }
                                 Button { store.removeRule(r.id) } label: { Image(systemName: "trash") }
                                     .buttonStyle(.plain).foregroundStyle(Theme.muted)
                             }

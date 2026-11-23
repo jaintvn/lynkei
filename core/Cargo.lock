@@ -1128,6 +1128,7 @@ dependencies = [
  "relay-proxy",
  "relay-store",
  "rustls",
+ "serde_json",
  "thiserror",
  "tokio",
  "uniffi",

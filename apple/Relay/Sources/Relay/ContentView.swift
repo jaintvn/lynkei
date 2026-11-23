@@ -11,6 +11,7 @@ struct ContentView: View {
     @State private var mapLocalFor: FfiTransaction?
     @State private var composing: ComposeDraft?
     @State private var dnsFor: FfiTransaction?
+    @State private var rewriting: RewriteDraft?
 
     var body: some View {
         @Bindable var store = store
@@ -30,11 +31,29 @@ struct ContentView: View {
         .background(Theme.bg)
         .foregroundStyle(Theme.fg)
         .onAppear { simulators = Simulators.booted() }
+        .task {
+            // For demos and screenshots: open the Rewrite editor on the newest call that has a JSON response.
+            guard ProcessInfo.processInfo.environment["RELAY_OPEN_REWRITE"] != nil else { return }
+            try? await Task.sleep(for: .seconds(4))
+            if let tx = store.transactions.last(where: { $0.responseBodyPreview?.hasPrefix("{") == true }) {
+                var d = RewriteDraft(copying: tx)
+                if let h = tx.responseHeaders.first(where: { $0.name.lowercased() == "content-type" }) {
+                    var step = StepDraft(kind: "set_header"); step.name = "x-env"; step.value = "staging"; _ = h
+                    d.sides[1].steps.append(step)
+                }
+                if let f = jsonLeaves(tx.responseBodyPreview).first(where: { $0.json.first?.isNumber == true }) {
+                    var step = StepDraft(kind: "set_json"); step.path = f.path; step.value = "999"
+                    d.sides[1].steps.append(step)
+                }
+                rewriting = d
+            }
+        }
         .sheet(isPresented: $showConnect) { ConnectView() }
         .sheet(isPresented: $showRules) { RulesView() }
         .sheet(item: $mapLocalFor) { MapLocalView(tx: $0) }
         .sheet(item: $composing) { ComposeView(draft: $0) }
         .sheet(item: $dnsFor) { DnsSpoofView(tx: $0) }
+        .sheet(item: $rewriting) { RewriteView(draft: $0) }
         .sheet(item: Binding(get: { store.paused.first }, set: { _ in })) { BreakpointView(item: $0).id($0.id) }
     }
 
@@ -229,6 +248,8 @@ struct ContentView: View {
 
     @ViewBuilder
     private func ruleMenu(for tx: FfiTransaction) -> some View {
+        Button("Rewrite this call…") { rewriting = RewriteDraft(copying: tx) }
+        Divider()
         Button("Repeat") { store.repeatNow(tx) }
         Button("Edit & Repeat…") { composing = ComposeDraft(copying: tx) }
         Divider()

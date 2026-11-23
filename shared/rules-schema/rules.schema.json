@@ -374,6 +374,24 @@
             "kind",
             "profile"
           ]
+        },
+        {
+          "description": "Connect to a different address for a host (like an `/etc/hosts` entry, but only for traffic\nthrough Relay). The app still sees the original host name: `Host`, TLS name and certificate\nchecks are unchanged. Only `match.host` is used.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "dns_spoof"
+            },
+            "to": {
+              "description": "An IP address (`127.0.0.1`, `10.0.0.7`) or another host name to look up instead.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "to"
+          ]
         }
       ],
       "required": [

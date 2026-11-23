@@ -33,6 +33,7 @@ use tokio_rustls::TlsAcceptor;
 use crate::body::{body_preview, strip_hop_by_hop};
 use crate::breakpoints::{BreakPhase, Breakpoints, Decision, Paused};
 use crate::ca::{CertAuthority, SniResolver};
+use crate::dns::{SpoofResolver, Spoofs};
 use crate::rules::{self, Early, RulesHook};
 use crate::sniff;
 use crate::tee::{BoxError, ProxyBody, TeeBody, TeeOutcome, full};
@@ -41,16 +42,49 @@ use crate::{EventSink, ProxyConfig};
 /// Magic host that serves the Relay CA certificate (open http://relay.ca on a device).
 pub const CA_DOWNLOAD_HOST: &str = "relay.ca";
 
-type UpstreamClient = Client<HttpsConnector<HttpConnector>, ProxyBody>;
+type Connector = HttpConnector<SpoofResolver>;
+type UpstreamClient = Client<HttpsConnector<Connector>, ProxyBody>;
 /// Prior-knowledge HTTP/2 over plain TCP (h2c), for apps that speak h2c (e.g. gRPC in development).
-type H2cClient = Client<HttpConnector, ProxyBody>;
+type H2cClient = Client<Connector, ProxyBody>;
 
-pub(crate) struct Shared {
-    pub ca: Arc<CertAuthority>,
+/// The upstream HTTP clients. Replaced when DNS spoofing rules change, because a pooled connection
+/// keeps talking to the address it was opened to.
+#[derive(Clone)]
+struct Clients {
     client: UpstreamClient,
     /// HTTP/1.1-only client for WebSocket upgrades (an upgrade can't happen over HTTP/2).
     ws_client: UpstreamClient,
     h2c: H2cClient,
+}
+
+impl Shared {
+    // Clones are taken so no lock is held while a request is in flight.
+    fn client(&self) -> UpstreamClient {
+        self.clients.read().unwrap().client.clone()
+    }
+    fn ws_client(&self) -> UpstreamClient {
+        self.clients.read().unwrap().ws_client.clone()
+    }
+    fn h2c(&self) -> H2cClient {
+        self.clients.read().unwrap().h2c.clone()
+    }
+}
+
+fn build_clients(cfg: &ProxyConfig, spoofs: &Spoofs) -> Result<Clients> {
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    Ok(Clients {
+        client: build_upstream_client(provider.clone(), cfg, spoofs, true)?,
+        ws_client: build_upstream_client(provider, cfg, spoofs, false)?,
+        h2c: Client::builder(TokioExecutor::new())
+            .http2_only(true)
+            .build(http_connector(cfg, spoofs)),
+    })
+}
+
+pub(crate) struct Shared {
+    pub ca: Arc<CertAuthority>,
+    clients: std::sync::RwLock<Clients>,
+    spoofs: Spoofs,
     sink: Arc<dyn EventSink>,
     next_id: AtomicU64,
     cfg: ProxyConfig,
@@ -177,6 +211,11 @@ impl ProxyHandle {
     }
     /// Replaces the active rules. `base` is the folder `map_local` files are read from.
     pub fn set_rules(&self, set: relay_model::rules::RuleSet, base: impl Into<std::path::PathBuf>) {
+        if self.shared.spoofs.set(&set)
+            && let Ok(fresh) = build_clients(&self.shared.cfg, &self.shared.spoofs)
+        {
+            *self.shared.clients.write().unwrap() = fresh;
+        }
         self.shared.rules.set(rules::ActiveRules::new(set, base));
     }
 
@@ -248,11 +287,8 @@ pub async fn start(cfg: ProxyConfig, sink: Arc<dyn EventSink>) -> Result<ProxyHa
         &cfg.data_dir,
         provider.clone(),
     )?);
-    let client = build_upstream_client(provider.clone(), &cfg, true)?;
-    let ws_client = build_upstream_client(provider, &cfg, false)?;
-    let h2c = Client::builder(TokioExecutor::new())
-        .http2_only(true)
-        .build(http_connector(&cfg));
+    let spoofs = Spoofs::default();
+    let clients = build_clients(&cfg, &spoofs)?;
     let listener = bind_with_fallback(cfg.listen, cfg.port_fallback).await?;
     let local_addr = listener.local_addr()?;
     let procs: Arc<ProcCache> = Arc::default();
@@ -267,9 +303,8 @@ pub async fn start(cfg: ProxyConfig, sink: Arc<dyn EventSink>) -> Result<ProxyHa
     };
     let shared = Arc::new(Shared {
         ca,
-        client,
-        ws_client,
-        h2c,
+        clients: std::sync::RwLock::new(clients),
+        spoofs,
         sink,
         next_id: AtomicU64::new(1),
         cfg,
@@ -310,8 +345,8 @@ pub async fn start(cfg: ProxyConfig, sink: Arc<dyn EventSink>) -> Result<ProxyHa
     })
 }
 
-fn http_connector(cfg: &ProxyConfig) -> HttpConnector {
-    let mut http = HttpConnector::new();
+fn http_connector(cfg: &ProxyConfig, spoofs: &Spoofs) -> Connector {
+    let mut http = HttpConnector::new_with_resolver(SpoofResolver::new(spoofs.clone()));
     http.enforce_http(false);
     http.set_nodelay(true);
     http.set_connect_timeout(Some(cfg.connect_timeout));
@@ -321,6 +356,7 @@ fn http_connector(cfg: &ProxyConfig) -> HttpConnector {
 fn build_upstream_client(
     provider: Arc<CryptoProvider>,
     cfg: &ProxyConfig,
+    spoofs: &Spoofs,
     allow_h2: bool,
 ) -> Result<UpstreamClient> {
     let mut roots = RootCertStore::empty();
@@ -337,9 +373,11 @@ fn build_upstream_client(
         .https_or_http()
         .enable_http1();
     let https = if allow_h2 {
-        builder.enable_http2().wrap_connector(http_connector(cfg))
+        builder
+            .enable_http2()
+            .wrap_connector(http_connector(cfg, spoofs))
     } else {
-        builder.wrap_connector(http_connector(cfg))
+        builder.wrap_connector(http_connector(cfg, spoofs))
     };
     Ok(Client::builder(TokioExecutor::new())
         .pool_idle_timeout(Duration::from_secs(60))
@@ -643,7 +681,8 @@ async fn raw_tunnel<S>(
     let mut t = base_transaction(
         &shared, "CONNECT", scheme, &name, port, "", peer, started_ms,
     );
-    let host = target;
+    // A dns_spoof rule applies to tunnelled connections too.
+    let host = shared.spoofs.lookup(&name).map_or(target, |(_, to)| to);
     let connect = tokio::time::timeout(
         shared.cfg.connect_timeout,
         TcpStream::connect((host.as_str(), port)),
@@ -734,6 +773,9 @@ async fn forward(
             applied.push(id.to_owned());
         }
     };
+    if let Some((id, _)) = shared.spoofs.lookup(&t.host) {
+        note(&mut applied, &id);
+    }
     let req_edits = active.edits(&matched, relay_model::rules::Phase::Request);
     let mut headers = parts.headers.clone();
     let mut body: ProxyBody = body.map_err(|e| -> BoxError { Box::new(e) }).boxed();
@@ -879,9 +921,9 @@ async fn forward(
 
     // An app speaking h2c can only be matched by an h2c upstream; everything else negotiates via ALPN.
     let upstream = if scheme == "http" && parts.version == Version::HTTP_2 {
-        shared.h2c.request(out)
+        shared.h2c().request(out)
     } else {
-        shared.client.request(out)
+        shared.client().request(out)
     };
     let resp = match tokio::time::timeout(shared.cfg.upstream_timeout, upstream).await {
         Ok(Ok(r)) => r,
@@ -1134,32 +1176,30 @@ async fn forward_upgrade(
             );
         }
     };
-    let mut resp = match tokio::time::timeout(
-        shared.cfg.upstream_timeout,
-        shared.ws_client.request(out),
-    )
-    .await
-    {
-        Ok(Ok(r)) => r,
-        Ok(Err(e)) => {
-            return fail(
-                shared,
-                t,
-                started,
-                StatusCode::BAD_GATEWAY,
-                format!("upstream error: {}", error_chain(&e)),
-            );
-        }
-        Err(_) => {
-            return fail(
-                shared,
-                t,
-                started,
-                StatusCode::GATEWAY_TIMEOUT,
-                "upstream timed out".into(),
-            );
-        }
-    };
+    let mut resp =
+        match tokio::time::timeout(shared.cfg.upstream_timeout, shared.ws_client().request(out))
+            .await
+        {
+            Ok(Ok(r)) => r,
+            Ok(Err(e)) => {
+                return fail(
+                    shared,
+                    t,
+                    started,
+                    StatusCode::BAD_GATEWAY,
+                    format!("upstream error: {}", error_chain(&e)),
+                );
+            }
+            Err(_) => {
+                return fail(
+                    shared,
+                    t,
+                    started,
+                    StatusCode::GATEWAY_TIMEOUT,
+                    "upstream timed out".into(),
+                );
+            }
+        };
     t.status = Some(resp.status().as_u16());
     t.upstream_http_version = Some(version_str(resp.version()).to_owned());
     t.response_headers = to_headers(resp.headers());

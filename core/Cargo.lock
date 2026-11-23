@@ -1184,6 +1184,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tokio-tungstenite",
+ "tower-service",
  "tracing",
  "webpki-roots",
 ]

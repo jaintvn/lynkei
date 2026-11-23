@@ -308,6 +308,7 @@ fn rule_kind(a: &relay_model::rules::RuleAction) -> &'static str {
         Breakpoint { .. } => "breakpoint",
         Block { .. } => "block",
         Throttle { .. } => "throttle",
+        DnsSpoof { .. } => "dns spoof",
     }
 }
 
@@ -379,6 +380,9 @@ fn checked_file(path: &str) -> Result<String, RelayError> {
 
 fn rule_summary(r: &relay_model::rules::Rule) -> String {
     let m = &r.matcher;
+    if let relay_model::rules::RuleAction::DnsSpoof { to } = &r.action {
+        return format!("{} → {to}", m.host.as_deref().unwrap_or("?"));
+    }
     let mut parts = vec![];
     if let Some(x) = &m.method {
         parts.push(x.clone());
@@ -936,6 +940,35 @@ impl RelayEngine {
         Ok(id)
     }
 
+    /// Adds a `dns_spoof` rule: connections Relay makes for `host` (and its subdomains) go to `to`
+    /// (an IP address or another host name) instead. The app still sees `host`.
+    pub fn add_dns_spoof_rule(&self, host: String, to: String) -> Result<String, RelayError> {
+        let host = host.trim().to_owned();
+        let mut set = self.current_rules();
+        let id = unique_rule_id(&set, "dns", &host);
+        set.rules.push(relay_model::rules::Rule {
+            id: id.clone(),
+            name: format!("{host} → {}", to.trim()),
+            enabled: true,
+            matcher: relay_model::rules::Matcher {
+                host: Some(host),
+                ..Default::default()
+            },
+            action: relay_model::rules::RuleAction::DnsSpoof {
+                to: to.trim().to_owned(),
+            },
+        });
+        let problems = set.validate();
+        if let Some(p) = problems.first() {
+            return Err(RelayError::Failed {
+                reason: p.message.clone(),
+            });
+        }
+        self.save_rules(set, None)
+            .map_err(|reason| RelayError::Failed { reason })?;
+        Ok(id)
+    }
+
     /// Points an existing `map local` rule at another file and/or status.
     pub fn set_map_local_file(
         &self,
@@ -1274,5 +1307,32 @@ mod tests {
         assert_eq!(out.len(), 3);
         assert!(out.iter().all(|r| r.status == 0 && r.error.is_some()));
         engine.stop();
+    }
+    #[test]
+    fn dns_spoof_rules_are_validated_and_listed() {
+        let dir = std::env::temp_dir().join(format!("relay-ffi-dns-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let engine = RelayEngine::new(dir.to_string_lossy().into()).unwrap();
+        assert!(
+            engine
+                .add_dns_spoof_rule("api.acme.com".into(), "http://x".into())
+                .is_err()
+        );
+        assert!(
+            engine
+                .add_dns_spoof_rule("".into(), "127.0.0.1".into())
+                .is_err()
+        );
+        let id = engine
+            .add_dns_spoof_rule("api.acme.com".into(), " 127.0.0.1 ".into())
+            .unwrap();
+        let r = engine
+            .list_rules()
+            .into_iter()
+            .find(|r| r.id == id)
+            .unwrap();
+        assert_eq!(r.kind, "dns spoof");
+        assert_eq!(r.summary, "api.acme.com → 127.0.0.1");
     }
 }

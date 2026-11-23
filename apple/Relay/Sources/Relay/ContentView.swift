@@ -10,6 +10,7 @@ struct ContentView: View {
     @State private var showRules = false
     @State private var mapLocalFor: FfiTransaction?
     @State private var composing: ComposeDraft?
+    @State private var dnsFor: FfiTransaction?
 
     var body: some View {
         @Bindable var store = store
@@ -33,6 +34,7 @@ struct ContentView: View {
         .sheet(isPresented: $showRules) { RulesView() }
         .sheet(item: $mapLocalFor) { MapLocalView(tx: $0) }
         .sheet(item: $composing) { ComposeView(draft: $0) }
+        .sheet(item: $dnsFor) { DnsSpoofView(tx: $0) }
         .sheet(item: Binding(get: { store.paused.first }, set: { _ in })) { BreakpointView(item: $0).id($0.id) }
     }
 
@@ -233,6 +235,7 @@ struct ContentView: View {
         Button("Breakpoint on \(tx.host)\(tx.path.split(separator: "?").first.map { String($0) } ?? "")") { store.addQuickRule("breakpoint", for: tx) }
         Button("Block this request") { store.addQuickRule("block", for: tx) }
         Button("Map local to a file…") { mapLocalFor = tx }
+        Button("Send \(tx.host) to another address…") { dnsFor = tx }
         Divider()
         Button("Throttle to 3G") { store.addQuickRule("throttle-3g", for: tx) }
         Button("Make it fail (offline)") { store.addQuickRule("offline", for: tx) }

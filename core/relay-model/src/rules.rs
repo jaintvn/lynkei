@@ -120,6 +120,13 @@ pub enum RuleAction {
     },
     /// Simulate a slow or lossy network.
     Throttle { profile: ThrottleProfile },
+    /// Connect to a different address for a host (like an `/etc/hosts` entry, but only for traffic
+    /// through Relay). The app still sees the original host name: `Host`, TLS name and certificate
+    /// checks are unchanged. Only `match.host` is used.
+    DnsSpoof {
+        /// An IP address (`127.0.0.1`, `10.0.0.7`) or another host name to look up instead.
+        to: String,
+    },
 }
 
 fn ok_status() -> u16 {
@@ -307,6 +314,27 @@ impl RuleSet {
                         ));
                     }
                 }
+                RuleAction::DnsSpoof { to } => {
+                    if m.host.as_deref().is_none_or(|h| h.trim().is_empty()) {
+                        p("dns_spoof needs `match.host`".into());
+                    }
+                    if m.method.is_some()
+                        || m.scheme.is_some()
+                        || m.path.is_some()
+                        || m.filter.is_some()
+                    {
+                        p("dns_spoof only uses `match.host` (DNS happens before any request is read)".into());
+                    }
+                    let target = to.trim();
+                    if target.is_empty()
+                        || target.contains(|c: char| c.is_whitespace() || c == '/' || c == '*')
+                        || target.contains("://")
+                    {
+                        p(format!(
+                            "dns_spoof.to `{to}` must be an IP address or a host name, like 127.0.0.1 or staging.internal"
+                        ));
+                    }
+                }
                 RuleAction::Block { status } if !status_ok(*status) => {
                     p(format!("status {status} is not between 100 and 599"))
                 }
@@ -356,6 +384,16 @@ impl RuleSet {
 }
 
 impl Matcher {
+    /// Whether `host` satisfies the `host` pattern (a rule without one matches every host).
+    pub fn matches_host(&self, host: &str) -> bool {
+        let Some(h) = &self.host else { return true };
+        let sub = !h.contains('*')
+            && host
+                .to_lowercase()
+                .ends_with(&format!(".{}", h.to_lowercase()));
+        Glob::new(h).matches(host) || sub
+    }
+
     /// Request-level match (method, scheme, host, path). `filter` needs a response and is
     /// evaluated by the engine with the full transaction.
     pub fn matches_request(&self, method: &str, scheme: &str, host: &str, path: &str) -> bool {
@@ -373,13 +411,8 @@ impl Matcher {
         {
             return false;
         }
-        if let Some(h) = &self.host {
-            let g = Glob::new(h);
-            let host_l = host.to_lowercase();
-            let sub = !h.contains('*') && host_l.ends_with(&format!(".{}", h.to_lowercase()));
-            if !(g.matches(host) || sub) {
-                return false;
-            }
+        if !self.matches_host(host) {
+            return false;
         }
         if let Some(p) = &self.path {
             let g = Glob::new(p);

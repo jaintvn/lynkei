@@ -1536,3 +1536,51 @@ async fn composed_requests_go_through_the_proxy_and_are_recorded() {
         .is_err()
     );
 }
+
+#[tokio::test]
+async fn dns_spoof_rules_send_a_host_to_another_address() {
+    let origin = start_http_origin().await;
+    let (_p, origin_ca) = start_https_origin().await;
+    let (proxy, log, _ca) = start_proxy(origin_ca, &[]).await;
+    let url = format!("http://shop.invalid:{origin}/spoofed");
+
+    // Without a rule the name does not exist.
+    let miss = fetch_via_proxy(proxy.local_addr, &url, &[]).await;
+    assert!(
+        miss.as_ref().map_or(true, |r| r.status >= 500),
+        "no such host without the rule"
+    );
+
+    proxy.set_rules(
+        rules(
+            "version: 1\nrules:\n  - { id: shop-local, kind: dns_spoof, match: { host: shop.invalid }, to: 127.0.0.1 }\n",
+        ),
+        ".",
+    );
+    let res = fetch_via_proxy(proxy.local_addr, &url, &[]).await.unwrap();
+    assert_eq!(res.status, 200);
+    assert!(String::from_utf8_lossy(&res.body).contains("/spoofed"));
+
+    let txs = wait_for(&log, 2).await;
+    let ok = txs.iter().find(|t| t.status == Some(200)).unwrap();
+    assert_eq!(
+        ok.host, "shop.invalid",
+        "the app still sees the original name"
+    );
+    assert_eq!(ok.applied_rules, vec!["shop-local".to_string()]);
+
+    // Switched off, it stops applying.
+    proxy.set_rules(
+        rules(
+            "version: 1\nrules:\n  - { id: shop-local, enabled: false, kind: dns_spoof, match: { host: shop.invalid }, to: 127.0.0.1 }\n",
+        ),
+        ".",
+    );
+    let off = fetch_via_proxy(
+        proxy.local_addr,
+        &format!("http://shop.invalid:{origin}/again"),
+        &[],
+    )
+    .await;
+    assert!(off.as_ref().map_or(true, |r| r.status >= 500));
+}

@@ -48,6 +48,11 @@ final class TrafficStore {
         _ = try engine.addMapLocalRule(request: tx, file: file, status: status)
         refreshRules()
     }
+    func addDnsSpoof(host: String, to: String) throws {
+        guard let engine else { return }
+        _ = try engine.addDnsSpoofRule(host: host, to: to)
+        refreshRules()
+    }
     func setMapLocalFile(_ id: String, file: String, status: UInt16) throws {
         try engine?.setMapLocalFile(id: id, file: file, status: status)
         refreshRules()

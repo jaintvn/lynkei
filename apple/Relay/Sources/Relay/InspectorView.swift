@@ -243,6 +243,7 @@ struct EndpointRules: View {
         case "map remote": return "On — sent to another server"
         case "rewrite": return "On — edited on the way through"
         case "throttle": return "On — slowed or dropped"
+        case "dns spoof": return "On — this host is looked up at another address"
         default: return "On"
         }
     }
@@ -258,6 +259,7 @@ enum RuleBadge {
         case "map remote": return "arrow.triangle.branch"
         case "rewrite": return "pencil.circle.fill"
         case "throttle": return "tortoise.fill"
+        case "dns spoof": return "network"
         default: return "slider.horizontal.3"
         }
     }

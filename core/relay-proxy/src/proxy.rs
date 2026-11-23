@@ -83,6 +83,12 @@ fn build_clients(cfg: &ProxyConfig, spoofs: &Spoofs) -> Result<Clients> {
 
 pub(crate) struct Shared {
     pub ca: Arc<CertAuthority>,
+    /// Off = HTTPS is tunnelled untouched (nothing is decrypted), whatever the passthrough list says.
+    decrypt: std::sync::atomic::AtomicBool,
+    /// The rules last given to `set_rules`, kept so the global throttle can be re-applied alone.
+    rule_source: std::sync::Mutex<Option<(relay_model::rules::RuleSet, std::path::PathBuf)>>,
+    /// A network preset applied to every request that no rule throttles (`3g`, `lte`, `offline`, …).
+    global_throttle: std::sync::Mutex<Option<String>>,
     clients: std::sync::RwLock<Clients>,
     spoofs: Spoofs,
     sink: Arc<dyn EventSink>,
@@ -216,6 +222,71 @@ impl ProxyHandle {
         {
             *self.shared.clients.write().unwrap() = fresh;
         }
+        *self.shared.rule_source.lock().unwrap() = Some((set, base.into()));
+        self.reapply_rules();
+    }
+
+    /// Turns HTTPS decryption on or off for new connections (off: tunnelled untouched).
+    pub fn set_decrypt(&self, on: bool) {
+        self.shared
+            .decrypt
+            .store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn decrypt(&self) -> bool {
+        self.shared
+            .decrypt
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Slows every request that no rule already throttles. `None` turns it off; the name is one of
+    /// `relay_model::rules::THROTTLE_PRESETS`.
+    pub fn set_global_throttle(&self, preset: Option<String>) -> Result<(), String> {
+        if let Some(p) = &preset
+            && !relay_model::rules::THROTTLE_PRESETS.contains(&p.as_str())
+        {
+            return Err(format!("unknown throttle preset `{p}`"));
+        }
+        *self.shared.global_throttle.lock().unwrap() = preset;
+        self.reapply_rules();
+        Ok(())
+    }
+
+    pub fn global_throttle(&self) -> Option<String> {
+        self.shared.global_throttle.lock().unwrap().clone()
+    }
+
+    /// Rebuilds the active rules: the user's, then a catch-all throttle rule last so explicit rules win.
+    fn reapply_rules(&self) {
+        let (mut set, base) = self
+            .shared
+            .rule_source
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or_else(|| {
+                (
+                    relay_model::rules::RuleSet {
+                        version: relay_model::rules::RULES_VERSION,
+                        rules: vec![],
+                    },
+                    std::path::PathBuf::from("."),
+                )
+            });
+        if let Some(preset) = self.global_throttle() {
+            set.rules.push(relay_model::rules::Rule {
+                id: "global-throttle".into(),
+                name: format!("Throttle everything ({preset})"),
+                enabled: true,
+                matcher: relay_model::rules::Matcher {
+                    host: Some("*".into()),
+                    ..Default::default()
+                },
+                action: relay_model::rules::RuleAction::Throttle {
+                    profile: relay_model::rules::ThrottleProfile::Preset(preset),
+                },
+            });
+        }
         self.shared.rules.set(rules::ActiveRules::new(set, base));
     }
 
@@ -313,6 +384,9 @@ pub async fn start(cfg: ProxyConfig, sink: Arc<dyn EventSink>) -> Result<ProxyHa
         listen_port: local_addr.port(),
         rules: RulesHook::default(),
         breaks: Breakpoints::default(),
+        decrypt: std::sync::atomic::AtomicBool::new(true),
+        rule_source: std::sync::Mutex::new(None),
+        global_throttle: std::sync::Mutex::new(None),
     });
     let (tx, mut rx) = oneshot::channel();
 
@@ -506,11 +580,14 @@ async fn handle_tunnel<S>(
     let passthrough = shared.is_passthrough(&name) || shared.is_passthrough(&host);
     let client = Prefixed::new(Bytes::from(first), client);
 
-    if is_tls && !passthrough {
+    let decrypt = shared.decrypt.load(std::sync::atomic::Ordering::Relaxed);
+    if is_tls && !passthrough && decrypt {
         intercept_tls(shared, client, name, port, peer).await;
     } else if is_http && !passthrough {
         serve_plain_http(shared, client, host, port, peer).await;
     } else {
+        // TLS with decryption switched off is tunnelled and labelled as such.
+        let passthrough = passthrough || (is_tls && !decrypt);
         raw_tunnel(shared, client, name, host, port, peer, passthrough).await;
     }
 }
@@ -709,7 +786,7 @@ async fn raw_tunnel<S>(
             t.request_body_size = read;
             t.response_body_size = written;
             if passthrough {
-                t.error = Some("SSL passthrough host — not decrypted".into());
+                t.error = Some("Not decrypted (SSL decryption is off, or this host is on the passthrough list)".into());
             }
         }
         Err(e) => {

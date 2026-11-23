@@ -261,7 +261,7 @@ final class IslandController {
                 : CGSize(width: compactWidth, height: g.barHeight)
         }
         let devices: CGFloat = deviceRows > 0 ? 30 + CGFloat(deviceRows) * 28 : 0
-        return CGSize(width: max(expandedWidth, compactWidth), height: g.barHeight + (held ? 372 : 292) + devices)
+        return CGSize(width: max(expandedWidth, compactWidth), height: g.barHeight + (held ? 372 : 292) + devices + 38)
     }
 }
 
@@ -366,6 +366,7 @@ struct IslandExpanded: View {
             }
             devicesSection
             Spacer(minLength: 0)
+            networkRow
             toggles
         }
         .padding(.horizontal, 18)
@@ -401,6 +402,30 @@ struct IslandExpanded: View {
                     Text("+\(ds.devices.count - shown.count) more in Connect device").font(.system(size: 11)).foregroundStyle(Theme.faint)
                 }
             }
+        }
+    }
+
+    /// Global switches: decrypt HTTPS or not, and slow the whole network with a preset.
+    private var networkRow: some View {
+        HStack(spacing: 8) {
+            Button(store.decrypt ? "SSL decrypt: On" : "SSL decrypt: Off") { store.setDecrypt(!store.decrypt) }
+                .buttonStyle(IslandChip(on: store.decrypt))
+                .help(store.decrypt ? "HTTPS is decrypted so you can read it" : "HTTPS passes through untouched; you see hosts and sizes only")
+            Menu {
+                Button("Normal") { store.setGlobalThrottle(nil) }
+                Divider()
+                ForEach(store.throttlePresets, id: \.self) { p in
+                    Button(p == "offline" ? "Offline" : p.uppercased()) { store.setGlobalThrottle(p) }
+                }
+            } label: {
+                Text(store.globalThrottle.map { "Throttle: \($0 == "offline" ? "Offline" : $0.uppercased())" } ?? "Throttle: Off")
+                    .font(.system(size: 11.5, weight: .semibold))
+                    .foregroundStyle(store.globalThrottle == nil ? Theme.fg : Color.black)
+                    .padding(.horizontal, 10).padding(.vertical, 4)
+                    .background(Capsule().fill(store.globalThrottle == nil ? Color.white.opacity(0.1) : Theme.paused))
+            }
+            .menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden).fixedSize()
+            Spacer()
         }
     }
 
@@ -440,7 +465,7 @@ struct IslandExpanded: View {
     private func callRow(_ tx: FfiTransaction) -> some View {
         HStack(spacing: 8) {
             StatusPill(tx: tx).frame(width: 50, alignment: .leading)
-            Text(tx.method).font(Theme.monoSmall).foregroundStyle(Theme.muted).frame(width: 46, alignment: .leading)
+            Text(tx.method).font(Theme.monoSmall).foregroundStyle(Theme.muted).lineLimit(1).frame(width: 66, alignment: .leading)
             Text("\(tx.host)\(tx.path)").font(.system(size: 11.5, design: .monospaced)).foregroundStyle(Theme.fg)
                 .lineLimit(1).truncationMode(.middle)
             Spacer(minLength: 4)
@@ -513,6 +538,12 @@ struct RelayMenuBar: View {
             ForEach(IslandController.Mode.allCases) { Text($0.title).tag($0) }
         }
         .pickerStyle(.inline)
+        Divider()
+        Toggle("Decrypt HTTPS", isOn: Binding(get: { store.decrypt }, set: { store.setDecrypt($0) }))
+        Picker("Throttle everything", selection: Binding(get: { store.globalThrottle ?? "" }, set: { store.setGlobalThrottle($0.isEmpty ? nil : $0) })) {
+            Text("Off").tag("")
+            ForEach(store.throttlePresets, id: \.self) { Text($0 == "offline" ? "Offline" : $0.uppercased()).tag($0) }
+        }
         Divider()
         Button(store.isRunning ? "Stop recording" : "Start recording") { store.isRunning ? store.stop() : store.start() }
         Button("Show Relay") { island.showMainWindow() }

@@ -470,6 +470,9 @@ pub struct RelayEngine {
     runtime: tokio::runtime::Runtime,
     data_dir: PathBuf,
     handle: Mutex<Option<ProxyHandle>>,
+    /// Live switches that survive stopping and starting the proxy.
+    decrypt: std::sync::atomic::AtomicBool,
+    global_throttle: Mutex<Option<String>>,
     vpn: Mutex<Option<relay_netstack::VpnCapture>>,
     store: Mutex<Option<Arc<relay_store::Store>>>,
     devices: Arc<relay_devices::DeviceManager>,
@@ -535,6 +538,8 @@ impl RelayEngine {
             runtime,
             data_dir,
             handle: Mutex::new(None),
+            decrypt: std::sync::atomic::AtomicBool::new(true),
+            global_throttle: Mutex::new(None),
             vpn: Mutex::new(None),
             store: Mutex::new(None),
         }))
@@ -676,6 +681,46 @@ impl RelayEngine {
             done.sort_by_key(|(i, _)| *i);
             done.into_iter().map(|(_, r)| r).collect()
         }))
+    }
+
+    /// Turns HTTPS decryption on or off (off: HTTPS is tunnelled untouched). Remembered across restarts of the proxy.
+    pub fn set_decrypt(&self, on: bool) {
+        self.decrypt.store(on, std::sync::atomic::Ordering::Relaxed);
+        if let Some(h) = self.handle.lock().unwrap().as_ref() {
+            h.set_decrypt(on);
+        }
+    }
+
+    pub fn decrypt_enabled(&self) -> bool {
+        self.decrypt.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Slows all traffic that no rule throttles; `None` turns it off. See `throttle_presets`.
+    pub fn set_global_throttle(&self, preset: Option<String>) -> Result<(), RelayError> {
+        if let Some(p) = &preset
+            && !relay_model::rules::THROTTLE_PRESETS.contains(&p.as_str())
+        {
+            return Err(RelayError::Failed {
+                reason: format!("unknown throttle preset `{p}`"),
+            });
+        }
+        *self.global_throttle.lock().unwrap() = preset.clone();
+        if let Some(h) = self.handle.lock().unwrap().as_ref() {
+            h.set_global_throttle(preset)
+                .map_err(|reason| RelayError::Failed { reason })?;
+        }
+        Ok(())
+    }
+
+    pub fn global_throttle(&self) -> Option<String> {
+        self.global_throttle.lock().unwrap().clone()
+    }
+
+    pub fn throttle_presets(&self) -> Vec<String> {
+        relay_model::rules::THROTTLE_PRESETS
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect()
     }
 
     /// Everything the filter matches (empty = all stored traffic), as a HAR 1.2 document, oldest first.
@@ -846,6 +891,8 @@ impl RelayEngine {
         if let Some(set) = load_rules(&self.data_dir) {
             handle.set_rules(set, &self.data_dir);
         }
+        handle.set_decrypt(self.decrypt.load(std::sync::atomic::Ordering::Relaxed));
+        let _ = handle.set_global_throttle(self.global_throttle.lock().unwrap().clone());
         let port = handle.local_addr.port();
         *guard = Some(handle);
         Ok(port)
@@ -1334,5 +1381,25 @@ mod tests {
             .unwrap();
         assert_eq!(r.kind, "dns spoof");
         assert_eq!(r.summary, "api.acme.com → 127.0.0.1");
+    }
+    #[test]
+    fn island_switches_are_remembered_and_validated() {
+        let dir = std::env::temp_dir().join(format!("relay-ffi-switch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let engine = RelayEngine::new(dir.to_string_lossy().into()).unwrap();
+        assert!(engine.decrypt_enabled());
+        engine.set_decrypt(false);
+        engine.set_global_throttle(Some("3g".into())).unwrap();
+        assert!(engine.set_global_throttle(Some("warp".into())).is_err());
+        assert!(engine.throttle_presets().contains(&"offline".to_string()));
+        // Set before the proxy starts, applied when it does.
+        engine
+            .start("127.0.0.1".into(), 0, Box::new(Quiet))
+            .unwrap();
+        assert!(!engine.decrypt_enabled());
+        assert_eq!(engine.global_throttle().as_deref(), Some("3g"));
+        engine.set_global_throttle(None).unwrap();
+        engine.stop();
     }
 }

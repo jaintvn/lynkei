@@ -1584,3 +1584,89 @@ async fn dns_spoof_rules_send_a_host_to_another_address() {
     .await;
     assert!(off.as_ref().map_or(true, |r| r.status >= 500));
 }
+
+#[tokio::test]
+async fn decryption_can_be_switched_off_and_on_while_running() {
+    let (origin_port, origin_ca) = start_https_origin().await;
+    let (proxy, log, relay_ca) = start_proxy(origin_ca.clone(), &[]).await;
+    let url = format!("https://localhost:{origin_port}/switch");
+    assert!(proxy.decrypt(), "on by default");
+
+    proxy.set_decrypt(false);
+    // The client sees the real certificate, so trusting only the origin's CA works.
+    let res = fetch_via_proxy(proxy.local_addr, &url, std::slice::from_ref(&origin_ca))
+        .await
+        .unwrap();
+    assert_eq!(res.status, 200);
+    // And Relay's own CA is not what it presented.
+    assert!(
+        fetch_via_proxy(proxy.local_addr, &url, std::slice::from_ref(&relay_ca))
+            .await
+            .is_err()
+    );
+
+    proxy.set_decrypt(true);
+    let res = fetch_via_proxy(proxy.local_addr, &url, &[relay_ca])
+        .await
+        .unwrap();
+    assert_eq!(res.status, 200);
+    let txs = wait_for(&log, 3).await;
+    assert!(
+        txs.iter()
+            .any(|t| t.state == TransactionState::InProgress
+                || t.state == TransactionState::Tunneled)
+    );
+    assert!(txs.iter().any(|t| t.decrypted && t.path == "/switch"));
+}
+
+#[tokio::test]
+async fn global_throttle_slows_everything_and_yields_to_rules() {
+    let origin = start_http_origin().await;
+    let (_p, origin_ca) = start_https_origin().await;
+    let (proxy, log, _ca) = start_proxy(origin_ca, &[]).await;
+    let url = format!("http://127.0.0.1:{origin}/slow");
+
+    let t0 = std::time::Instant::now();
+    fetch_via_proxy(proxy.local_addr, &url, &[]).await.unwrap();
+    let baseline = t0.elapsed();
+
+    assert!(proxy.set_global_throttle(Some("nonsense".into())).is_err());
+    proxy
+        .set_global_throttle(Some("high-latency".into()))
+        .unwrap();
+    assert_eq!(proxy.global_throttle().as_deref(), Some("high-latency"));
+    let t0 = std::time::Instant::now();
+    fetch_via_proxy(proxy.local_addr, &url, &[]).await.unwrap();
+    assert!(
+        t0.elapsed() >= baseline + Duration::from_millis(600),
+        "800 ms of added latency"
+    );
+    let txs = wait_for(&log, 2).await;
+    assert!(
+        txs.iter()
+            .any(|t| t.applied_rules == vec!["global-throttle".to_string()])
+    );
+
+    // Rules set afterwards keep working alongside it, and an explicit rule beats it.
+    proxy.set_rules(
+        rules("version: 1\nrules:\n  - { id: fast-lane, kind: throttle, match: { path: /slow }, profile: lte }\n"),
+        ".",
+    );
+    let t0 = std::time::Instant::now();
+    fetch_via_proxy(proxy.local_addr, &url, &[]).await.unwrap();
+    assert!(t0.elapsed() < Duration::from_millis(600));
+
+    // Offline drops requests; turning it off restores normal service.
+    proxy.set_rules(rules("version: 1\nrules: []\n"), ".");
+    proxy.set_global_throttle(Some("offline".into())).unwrap();
+    let off = fetch_via_proxy(proxy.local_addr, &url, &[]).await;
+    assert!(off.as_ref().map_or(true, |r| r.status >= 500));
+    proxy.set_global_throttle(None).unwrap();
+    assert_eq!(
+        fetch_via_proxy(proxy.local_addr, &url, &[])
+            .await
+            .unwrap()
+            .status,
+        200
+    );
+}

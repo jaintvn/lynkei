@@ -15,6 +15,10 @@ final class TrafficStore {
     /// Requests/responses held at a breakpoint, waiting for a decision.
     private(set) var paused: [FfiPaused] = []
     private(set) var rules: [FfiRule] = []
+    /// Live switches (also on the notch island): HTTPS decryption, and a network preset for everything.
+    private(set) var decrypt = true
+    private(set) var globalThrottle: String?
+    private(set) var throttlePresets: [String] = ["3g", "edge", "lte", "lte-lossy", "high-latency", "offline"]
     var search: String = "" { didSet { revision &+= 1 } }
     /// "Only this device/app" choice, as a search term (`app:AcmeShop`, `client:192.168.0.5`).
     var source: String? { didSet { revision &+= 1 } }
@@ -39,6 +43,23 @@ final class TrafficStore {
     var isRunning: Bool { port != nil }
 
     // MARK: Rules and breakpoints
+
+    func setDecrypt(_ on: Bool) {
+        engine?.setDecrypt(on: on)
+        decrypt = on
+    }
+    func setGlobalThrottle(_ preset: String?) {
+        do {
+            try engine?.setGlobalThrottle(preset: preset)
+            globalThrottle = preset
+        } catch { ruleMessage = "\(error)" }
+    }
+    private func refreshSwitches() {
+        guard let e = engine else { return }
+        decrypt = e.decryptEnabled()
+        globalThrottle = e.globalThrottle()
+        throttlePresets = e.throttlePresets()
+    }
 
     func refreshRules() { if let e = engine { rules = e.listRules() } }
     func rulesFor(_ tx: FfiTransaction) -> [FfiRule] { engine?.rulesFor(request: tx) ?? [] }
@@ -170,6 +191,7 @@ final class TrafficStore {
             caPath = try engine.caCertificatePath()
             status = "Listening on port \(bound)"
             refreshRules()
+            refreshSwitches()
             watchBreakpoints()
             errorMessage = nil
         } catch {

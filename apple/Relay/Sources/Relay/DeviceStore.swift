@@ -13,6 +13,8 @@ final class DeviceStore {
     private(set) var wifiURL: String = ""
     /// What the Android-over-Wi-Fi QR code encodes (empty without a network address).
     private(set) var androidWifiURL: String = ""
+    /// The iPhone setup page by IP address (more reliable than the .local name on office networks); falls back to the .local URL.
+    var iphoneSetupURL: String { androidWifiURL.isEmpty ? wifiURL : androidWifiURL.replacingOccurrences(of: "/android", with: "/setup") }
     private(set) var scanning = false
     /// Devices the user disconnected on purpose (so the island does not warn about them).
     private(set) var userDisconnected: Set<String> = []

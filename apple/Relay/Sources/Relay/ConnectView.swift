@@ -8,6 +8,7 @@ struct ConnectView: View {
     @Environment(TrafficStore.self) private var traffic
     @Environment(\.dismiss) private var dismiss
     @State private var devices: DeviceStore?
+    @State private var usbPhones: [String] = []
 
     var body: some View {
         VStack(spacing: 0) {
@@ -23,7 +24,8 @@ struct ConnectView: View {
                         ForEach(NetworkClient.detect(from: traffic.transactions)) { client in
                             NetworkClientCard(client: client)
                         }
-                        WifiCard(url: devices.wifiURL, trafficSeen: false)
+                        if !usbPhones.isEmpty { UsbIPhoneCard(names: usbPhones) }
+                        WifiCard(url: devices.iphoneSetupURL, altURL: devices.wifiURL, trafficSeen: false)
                         AndroidWifiCard(url: devices.androidWifiURL)
                     }
                     .padding(24)
@@ -46,6 +48,13 @@ struct ConnectView: View {
             let s = traffic.deviceStore()
             devices = s
             s.startWatching()
+        }
+        .task {
+            // Look for cabled iPhones while the sheet is open.
+            while !Task.isCancelled {
+                usbPhones = await Task.detached { UsbIPhones.detect() }.value
+                try? await Task.sleep(for: .seconds(5))
+            }
         }
         .onDisappear { devices?.stopWatching() }
     }
@@ -203,6 +212,8 @@ struct NetworkClientCard: View {
 
 struct WifiCard: View {
     let url: String
+    /// The `<mac>.local` form, shown as a second address to try.
+    var altURL: String = ""
     let trafficSeen: Bool
 
     var body: some View {
@@ -240,6 +251,11 @@ struct WifiCard: View {
             .padding(12)
             .background(RoundedRectangle(cornerRadius: 10).fill(Theme.panel))
             .overlay(RoundedRectangle(cornerRadius: 10).stroke(Theme.line))
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Page won't open?").font(.system(size: 11.5, weight: .semibold))
+                Text("The phone and this Mac must be on the same Wi-Fi. Office and guest networks often block devices from reaching each other; then use a personal hotspot or an Android phone over USB. If the Mac's firewall is on, allow Relay in System Settings → Network → Firewall.\(altURL.isEmpty ? "" : " Or try \(altURL)")")
+                    .font(.system(size: 11.5)).foregroundStyle(Theme.muted).textSelection(.enabled)
+            }
         }
         .padding(18)
         .background(RoundedRectangle(cornerRadius: 14).fill(Theme.raised))

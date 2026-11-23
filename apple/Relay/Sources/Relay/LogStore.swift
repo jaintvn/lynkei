@@ -208,7 +208,7 @@ enum AdbLogs {
         return c.first { FileManager.default.isExecutableFile(atPath: $0) }
     }()
 
-    private static func run(_ args: [String]) -> String {
+    static func run(_ args: [String]) -> String {
         guard let path else { return "" }
         let p = Process()
         p.executableURL = URL(fileURLWithPath: path)

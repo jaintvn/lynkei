@@ -1,6 +1,7 @@
 //! The setup pages a phone opens to get connected: `http://<mac>.local:8888/setup`.
 //!
 //! - `/setup`            a short guide (the QR code on the Mac points here)
+//! - `/android`          the same for an Android phone (the Android QR code points here)
 //! - `/relay.mobileconfig`  iOS profile that installs the Relay CA
 //! - `/proxy.pac`        proxy auto-config, so the phone survives a changed Mac IP
 //! - `/ca.pem`, `/ca.crt`  the CA as PEM / DER (Android, macOS, Linux)
@@ -21,6 +22,11 @@ pub fn route(path: &str, host: &str, ca_pem: &str, ca_der: &[u8]) -> Option<Page
             content_type: "text/html; charset=utf-8",
             filename: None,
             body: guide_html(host).into_bytes(),
+        },
+        "/android" => Page {
+            content_type: "text/html; charset=utf-8",
+            filename: None,
+            body: android_html(host).into_bytes(),
         },
         "/ca.pem" | "/relay-ca.pem" => Page {
             content_type: "application/x-x509-ca-cert",
@@ -139,6 +145,46 @@ fn guide_html(host: &str) -> String {
     )
 }
 
+/// The Android version of the guide: certificate, then the Wi-Fi proxy. `host` is `ip:port`.
+fn android_html(host: &str) -> String {
+    let (name, port) = host.rsplit_once(':').unwrap_or((host, "8888"));
+    format!(
+        r#"<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Connect an Android phone to Relay</title>
+<style>
+  :root {{ color-scheme: dark light; }}
+  body {{ font: 16px/1.5 system-ui, sans-serif; margin: 0; padding: 24px 20px 48px; background: #0D0E11; color: #E9EBF0; }}
+  main {{ max-width: 520px; margin: 0 auto; }}
+  h1 {{ font-size: 24px; margin: 0 0 4px; letter-spacing: -0.02em; }}
+  p.sub {{ color: #A1A7B4; margin: 0 0 24px; }}
+  ol {{ padding-left: 0; list-style: none; counter-reset: s; }}
+  li {{ counter-increment: s; background: #13151A; border: 1px solid rgba(255,255,255,.1); border-radius: 14px; padding: 16px; margin: 0 0 12px; }}
+  li::before {{ content: counter(s); display: inline-grid; place-items: center; width: 24px; height: 24px; border-radius: 12px; background: #7C8CFF; color: #0D0E11; font-weight: 700; font-size: 13px; margin-right: 10px; }}
+  a.btn {{ display: block; margin-top: 12px; text-align: center; background: #7C8CFF; color: #0D0E11; font-weight: 650; text-decoration: none; padding: 12px; border-radius: 10px; }}
+  code {{ background: rgba(255,255,255,.08); padding: 1px 6px; border-radius: 5px; font-size: 14px; }}
+  small {{ color: #8A91A0; }}
+</style></head>
+<body><main>
+<h1>Connect an Android phone</h1>
+<p class="sub">Two steps. Your phone and the Mac must be on the same Wi-Fi.</p>
+<ol>
+  <li><b>Install the certificate</b><br>Tap the button to download it, then install it from Settings:<br>
+    <small>Pixel and most phones: Settings → Security → Encryption &amp; credentials → Install a certificate → CA certificate → Install anyway.<br>
+    Samsung: Settings → Security and privacy → More security settings → Install from device storage → CA certificate.</small><br>
+    <small>Pick <b>relay-ca.crt</b> from Downloads. A screen lock is required.</small>
+    <a class="btn" href="/ca.crt">Download certificate</a></li>
+  <li><b>Use the proxy</b><br>Settings → Wi-Fi → tap your network (gear icon) → Advanced → Proxy → <b>Manual</b>:<br>
+    Host <code>{name}</code> · Port <code>{port}</code><br>
+    <small>Or choose <b>Auto-config</b> with <code>http://{host}/proxy.pac</code>. To undo, set Proxy back to None.</small></li>
+</ol>
+<p><small>Android apps built for Android 7 or newer ignore certificates you install yourself unless the app is a debug build that trusts them, so most store apps stay unreadable. Browsers and your own debug builds work. Relay shows which hosts it could not read.</small></p>
+</main></body></html>
+"#
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -148,6 +194,7 @@ mod tests {
         let der = [0x30, 0x82, 0x01, 0x0a, 1, 2, 3];
         for (p, ct) in [
             ("/setup", "text/html"),
+            ("/android", "text/html"),
             ("/", "text/html"),
             ("/relay.mobileconfig", "application/x-apple-aspen-config"),
             ("/proxy.pac", "application/x-ns-proxy-autoconfig"),
@@ -186,6 +233,13 @@ mod tests {
             uuid_from(&der, 2),
             "inner and outer payloads differ"
         );
+    }
+
+    #[test]
+    fn android_guide_names_the_proxy_host_and_port() {
+        let h = android_html("192.168.1.5:8888");
+        assert!(h.contains("<code>192.168.1.5</code>") && h.contains("<code>8888</code>"));
+        assert!(h.contains("/ca.crt") && h.contains("http://192.168.1.5:8888/proxy.pac"));
     }
 
     #[test]

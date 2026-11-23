@@ -11,6 +11,8 @@ final class DeviceStore {
     private(set) var busy: Set<String> = []
     private(set) var errors: [String: String] = [:]
     private(set) var wifiURL: String = ""
+    /// What the Android-over-Wi-Fi QR code encodes (empty without a network address).
+    private(set) var androidWifiURL: String = ""
     private(set) var scanning = false
     /// Devices the user disconnected on purpose (so the island does not warn about them).
     private(set) var userDisconnected: Set<String> = []
@@ -41,11 +43,12 @@ final class DeviceStore {
     func refresh() async {
         guard let engine = engine() else { return }
         scanning = true
-        let (list, url) = await Task.detached(priority: .utility) { (engine.listDevices(), engine.wifiSetupUrl()) }.value
+        let (list, url, androidURL) = await Task.detached(priority: .utility) { (engine.listDevices(), engine.wifiSetupUrl(), engine.wifiAndroidUrl()) }.value
         devices = list
         Analytics.devicePlatforms = Dictionary(list.map { ($0.name, $0.kind.hasPrefix("ios") ? Analytics.Platform.ios : .android) }, uniquingKeysWith: { a, _ in a })
         Analytics.androidDevice = list.first { $0.kind.hasPrefix("android") && ($0.connected || results[$0.id] != nil) }?.name
         wifiURL = url
+        androidWifiURL = androidURL
         // A screen opened later (or after a restart of the sheet) still shows the checklist.
         for d in list where d.connected && results[d.id] == nil {
             let id = d.id

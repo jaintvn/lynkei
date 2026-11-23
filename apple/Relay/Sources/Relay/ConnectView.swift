@@ -24,6 +24,7 @@ struct ConnectView: View {
                             NetworkClientCard(client: client)
                         }
                         WifiCard(url: devices.wifiURL, trafficSeen: false)
+                        AndroidWifiCard(url: devices.androidWifiURL)
                     }
                     .padding(24)
                     if devices.devices.isEmpty {

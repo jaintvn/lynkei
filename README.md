@@ -136,6 +136,8 @@ It finds the daemon through `RELAY_DATA_DIR` (default: the app's data folder); `
 scripts/build-apple.sh && scripts/make-mac-app.sh && open apple/Relay/build/Relay.app
 ```
 
+On the Connect screen, the **Android over Wi-Fi** card has a QR code for your phone: it opens a page with the certificate and the exact Wi-Fi proxy settings, and ticks off when the phone's traffic arrives. *No cable? Pair with adb* pairs a phone with Wireless debugging so it shows up like a USB device.
+
 Click **Connect device**. Relay finds booted iOS Simulators and Android emulators or USB phones and sets each one up (proxy and certificate) with one click. For an iPhone on Wi-Fi, scan the QR code on that screen. From a terminal, `relay devices connect <id>` does the same.
 
 ## The notch island

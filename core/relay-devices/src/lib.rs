@@ -605,6 +605,21 @@ pub fn parse_adb_devices(text: &str) -> Vec<Device> {
         .collect()
 }
 
+/// This Mac's address on the local network (what an Android phone on the same Wi-Fi can reach).
+/// Android does not resolve `.local` names reliably, so its QR code uses the IP.
+pub fn lan_ip() -> Option<std::net::IpAddr> {
+    // Connecting a UDP socket sends nothing; it only makes the OS pick the outgoing interface.
+    let sock = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    sock.connect("192.0.2.1:9").ok()?;
+    let ip = sock.local_addr().ok()?.ip();
+    (!ip.is_loopback() && !ip.is_unspecified()).then_some(ip)
+}
+
+/// `http://<ip>:<port>/android`, or `None` when the Mac has no network address.
+pub fn android_setup_url(port: u16) -> Option<String> {
+    lan_ip().map(|ip| format!("http://{ip}:{port}/android"))
+}
+
 /// `http://<LocalHostName>.local:<port>/setup` — what the iPhone QR code encodes. The `.local`
 /// name survives the Mac's IP changing.
 pub fn wifi_setup_url(runner: &dyn Runner, port: u16) -> String {

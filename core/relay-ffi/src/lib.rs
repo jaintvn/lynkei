@@ -1019,6 +1019,18 @@ impl RelayEngine {
         relay_devices::wifi_setup_url(&relay_devices::SystemRunner, port)
     }
 
+    /// `http://<this Mac's IP>:<port>/android` — what the Android-over-Wi-Fi QR code encodes. Empty without a network.
+    pub fn wifi_android_url(&self) -> String {
+        let port = self
+            .handle
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|h| h.local_addr.port())
+            .unwrap_or(8888);
+        relay_devices::android_setup_url(port).unwrap_or_default()
+    }
+
     pub fn vpn_stats(&self) -> Option<VpnStats> {
         use std::sync::atomic::Ordering::Relaxed;
         self.vpn.lock().unwrap().as_ref().map(|v| VpnStats {

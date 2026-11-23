@@ -1096,6 +1096,15 @@ async fn a_host_that_refuses_the_relay_ca_is_passed_through_afterwards() {
         txs[0].error
     );
     assert_eq!(txs[1].state, TransactionState::Tunneled);
+    // The tunnelled call says why it could not be read.
+    assert!(
+        txs[1]
+            .error
+            .as_deref()
+            .is_some_and(|e| e.starts_with("Not decrypted: the app rejected")),
+        "{:?}",
+        txs[1].error
+    );
 }
 
 #[tokio::test]

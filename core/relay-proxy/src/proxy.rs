@@ -179,14 +179,22 @@ impl EventSink for ProcSink {
 
 impl Shared {
     fn is_passthrough(&self, name: &str) -> bool {
-        self.cfg.is_passthrough(name)
-            || self
-                .learned_passthrough
-                .lock()
-                .unwrap()
-                .contains(&name.trim_end_matches('.').to_ascii_lowercase())
+        self.cfg.is_passthrough(name) || self.is_learned(name)
+    }
+
+    /// True when the app rejected Relay's certificate for this host earlier, so Relay stopped decrypting it.
+    fn is_learned(&self, name: &str) -> bool {
+        self.learned_passthrough
+            .lock()
+            .unwrap()
+            .contains(&name.trim_end_matches('.').to_ascii_lowercase())
     }
 }
+
+/// Why a TLS connection was tunnelled instead of decrypted. The Mac app recognises these by their start.
+pub const NOT_DECRYPTED_OFF: &str = "Not decrypted: SSL decryption is switched off in Relay.";
+pub const NOT_DECRYPTED_LISTED: &str = "Not decrypted: this host is on Relay's passthrough list.";
+pub const NOT_DECRYPTED_REJECTED: &str = "Not decrypted: the app rejected Relay's certificate for this host earlier, so Relay stopped decrypting it. The app pins certificates or does not trust the Relay CA.";
 
 /// True when the client's handshake error says it rejected our certificate (not a network glitch).
 fn certificate_rejected(err: &str) -> bool {
@@ -227,6 +235,12 @@ impl ProxyHandle {
     }
 
     /// Turns HTTPS decryption on or off for new connections (off: tunnelled untouched).
+    /// Forgets the hosts Relay stopped decrypting because an app rejected its certificate, so the
+    /// next connection tries again (after the user installed or trusted the CA, say).
+    pub fn forget_learned_passthrough(&self) {
+        self.shared.learned_passthrough.lock().unwrap().clear();
+    }
+
     pub fn set_decrypt(&self, on: bool) {
         self.shared
             .decrypt
@@ -586,9 +600,19 @@ async fn handle_tunnel<S>(
     } else if is_http && !passthrough {
         serve_plain_http(shared, client, host, port, peer).await;
     } else {
-        // TLS with decryption switched off is tunnelled and labelled as such.
-        let passthrough = passthrough || (is_tls && !decrypt);
-        raw_tunnel(shared, client, name, host, port, peer, passthrough).await;
+        // A tunnelled TLS connection says why it was not decrypted.
+        let why = if !is_tls {
+            None
+        } else if shared.is_learned(&name) || shared.is_learned(&host) {
+            Some(NOT_DECRYPTED_REJECTED)
+        } else if passthrough {
+            Some(NOT_DECRYPTED_LISTED)
+        } else if !decrypt {
+            Some(NOT_DECRYPTED_OFF)
+        } else {
+            None
+        };
+        raw_tunnel(shared, client, name, host, port, peer, why).await;
     }
 }
 
@@ -748,7 +772,7 @@ async fn raw_tunnel<S>(
     target: String,
     port: u16,
     peer: SocketAddr,
-    passthrough: bool,
+    why_not_decrypted: Option<&'static str>,
 ) where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -785,8 +809,8 @@ async fn raw_tunnel<S>(
             t.state = TransactionState::Tunneled;
             t.request_body_size = read;
             t.response_body_size = written;
-            if passthrough {
-                t.error = Some("Not decrypted (SSL decryption is off, or this host is on the passthrough list)".into());
+            if let Some(why) = why_not_decrypted {
+                t.error = Some(why.into());
             }
         }
         Err(e) => {

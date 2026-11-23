@@ -859,6 +859,14 @@ impl RelayEngine {
         }
     }
 
+    /// Makes Relay try decrypting again the hosts it gave up on because an app rejected its
+    /// certificate (use after installing or trusting the CA on the device).
+    pub fn retry_decrypting(&self) {
+        if let Some(h) = self.handle.lock().unwrap().as_ref() {
+            h.forget_learned_passthrough();
+        }
+    }
+
     pub fn decrypt_enabled(&self) -> bool {
         self.decrypt.load(std::sync::atomic::Ordering::Relaxed)
     }

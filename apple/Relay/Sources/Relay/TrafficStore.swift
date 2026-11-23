@@ -88,6 +88,12 @@ final class TrafficStore {
 
     // MARK: Rules and breakpoints
 
+    /// Tries again the hosts Relay gave up on because an app rejected its certificate.
+    func retryDecrypting() {
+        engine?.retryDecrypting()
+        ruleMessage = "Relay will try decrypting these hosts again. Run the call in the app."
+    }
+
     func setDecrypt(_ on: Bool) {
         engine?.setDecrypt(on: on)
         decrypt = on

@@ -116,8 +116,10 @@ struct InspectorView: View {
         GRPCSummary(tx: tx)
         timing(tx)
         section("Response body") { BodyView(tx: tx, isRequest: false) }
-        if Analytics.isError(tx) { failing(tx) }
-        if let error = tx.error, tx.state == .failed {
+        if Analytics.isError(tx), TLSIssue.of(tx) == nil { failing(tx) }
+        if let advice = store.advice(for: tx) {
+            TLSAdviceView(advice: advice)
+        } else if let error = tx.error, tx.state == .failed {
             callout(title: "The call failed", text: error)
         }
         EndpointRules(tx: tx)

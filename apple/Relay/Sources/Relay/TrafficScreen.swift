@@ -269,6 +269,7 @@ struct TrafficScreen: View {
         let shown = rows
         return VStack(spacing: 0) {
             chips
+            TLSBanner(rows: base)
             tableHeader
             if store.transactions.isEmpty {
                 EmptyStateView(port: store.port, caPath: store.caPath)

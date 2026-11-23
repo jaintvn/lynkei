@@ -20,13 +20,6 @@ design/stitch/
 
 .DS_Store
 
-# Android (rebuild native lib + bindings with scripts/build-android.sh)
-android/**/.gradle/
-android/**/build/
-android/**/local.properties
-android/relay-android/app/src/main/jniLibs/
-android/relay-android/app/src/main/java/uniffi/
-.kotlin/
 
 # iOS demo app build output
 ios/**/build/

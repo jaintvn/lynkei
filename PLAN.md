@@ -2,6 +2,8 @@
 
 > Working name: **Relay**. You can rename it.
 > Goal: Charles-level power (capture, SSL, breakpoints, rewrite, map local/remote, throttle), with **one-click device setup**, a modern UI, a notch "Dynamic Island", and **full MCP control** so AI agents can drive every operation.
+> **Update (2026-11-23): Relay for Android is on hold until there is user feedback.** The Android app, its demo app, its build scripts and its CI job were removed from the repo. The Mac app still connects Android emulators and phones over adb, and the Rust core keeps its VPN/TUN support for later. Sections 8 and P7–P9 below describe the future app.
+>
 > Products: **Relay for Mac** first, then **Relay for Android**, an on-device debugger that captures and edits traffic of apps on the phone itself, with no Mac needed. Both share one engine, one rule format and one session format, so the Android app is mostly UI work when it starts.
 
 ---

@@ -1093,6 +1093,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "relay-demo-server"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "flate2",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "relay-devices"
 version = "0.1.0"
 dependencies = [

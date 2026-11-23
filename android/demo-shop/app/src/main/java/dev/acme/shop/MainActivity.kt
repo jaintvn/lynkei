@@ -6,6 +6,7 @@ import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
 import android.widget.Button
+import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -18,23 +19,35 @@ import kotlin.concurrent.thread
  * watch Relay track them: list, detail, add to cart (JSON POST), a failing checkout (500),
  * an expired token (401), a slow call and an image. Nothing here knows about Relay.
  *
- * `adb shell am start -n dev.acme.shop/.MainActivity --ez autorun true` runs every call once.
+ * Calls go to a local mock API (`scripts/demo-server.sh`), so the demo works offline and never hits
+ * a rate limit. The emulator reaches the Mac at http://10.0.2.2:8099; on a real phone type the Mac's
+ * address into the Server field. "Tip of the day" still goes to api.github.com so there is one real
+ * HTTPS call to decrypt.
+ *
+ * `adb shell am start -n dev.acme.shop/.MainActivity --ez autorun true` runs every call once
+ * (add `--es server http://192.168.1.5:8099` to choose the server).
  */
 class MainActivity : Activity() {
+
+    private companion object {
+        /** The Mac, as seen from the Android emulator. */
+        const val DEFAULT_SERVER = "http://10.0.2.2:8099"
+    }
 
     private class Call(val label: String, val method: String, val url: String, val body: String? = null)
 
     private val calls = listOf(
-        Call("Browse shoes", "GET", "https://httpbin.org/get?category=shoes&page=2"),
-        Call("Product list", "GET", "https://httpbin.org/json"),
-        Call("Add to cart", "POST", "https://httpbin.org/post", """{"sku":"p_8231","qty":1,"price":129.0}"""),
-        Call("Checkout (fails)", "POST", "https://httpbin.org/status/500", """{"cart":{"items":3,"total":248.9}}"""),
-        Call("Refresh token (401)", "POST", "https://httpbin.org/status/401", """{"refresh":"expired"}"""),
-        Call("Recommendations (slow)", "GET", "https://httpbin.org/delay/2"),
-        Call("Product image", "GET", "https://httpbin.org/image/png"),
+        Call("Browse shoes", "GET", "/get?category=shoes&page=2"),
+        Call("Product list", "GET", "/json"),
+        Call("Add to cart", "POST", "/post", """{"sku":"p_8231","qty":1,"price":129.0}"""),
+        Call("Checkout (fails)", "POST", "/status/500", """{"cart":{"items":3,"total":248.9}}"""),
+        Call("Refresh token (401)", "POST", "/status/401", """{"refresh":"expired"}"""),
+        Call("Recommendations (slow)", "GET", "/delay/2"),
+        Call("Product image", "GET", "/image/png"),
         Call("Tip of the day", "GET", "https://api.github.com/zen"),
     )
 
+    private lateinit var serverField: EditText
     private lateinit var log: TextView
     private lateinit var scroll: ScrollView
 
@@ -44,17 +57,21 @@ class MainActivity : Activity() {
         if (intent.getBooleanExtra("autorun", false)) runAll()
     }
 
+    private fun serverUrl(): String = serverField.text.toString().trim().trimEnd('/')
+
     private fun runAll() {
+        val base = serverUrl() // read on the UI thread; the calls run on a worker
         thread {
-            calls.forEach { run(it); Thread.sleep(400) }
+            calls.forEach { run(it, base); Thread.sleep(400) }
             line("— done —")
         }
     }
 
-    private fun run(c: Call) {
+    private fun run(c: Call, base: String) {
         val t0 = System.currentTimeMillis()
         try {
-            val conn = URL(c.url).openConnection() as HttpURLConnection
+            val target = if (c.url.startsWith("http")) c.url else base + c.url
+            val conn = URL(target).openConnection() as HttpURLConnection
             conn.requestMethod = c.method
             conn.connectTimeout = 15_000
             conn.readTimeout = 30_000
@@ -99,6 +116,16 @@ class MainActivity : Activity() {
         })
         root.addView(TextView(this).apply { text = "v3.4.1 · demo app for Relay"; setTextColor(ink); alpha = .6f })
 
+        serverField = EditText(this).apply {
+            setText(intent.getStringExtra("server") ?: DEFAULT_SERVER)
+            setSingleLine()
+            typeface = Typeface.MONOSPACE
+            textSize = 13f
+            setTextColor(ink)
+            hint = "Server"
+        }
+        root.addView(serverField, LinearLayout.LayoutParams(-1, -2).apply { topMargin = (10 * dp).toInt() })
+
         val grid = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         calls.chunked(2).forEach { pair ->
             val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
@@ -109,7 +136,7 @@ class MainActivity : Activity() {
                     textSize = 12f
                     setTextColor(Color.WHITE)
                     background = rounded(brand)
-                    setOnClickListener { thread { run(c) } }
+                    setOnClickListener { val base = serverUrl(); thread { run(c, base) } }
                 }, LinearLayout.LayoutParams(0, (44 * dp).toInt(), 1f).apply { setMargins(0, (6 * dp).toInt(), (6 * dp).toInt(), 0) })
             }
             grid.addView(row)

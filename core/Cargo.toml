@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["relay-model", "relay-proxy", "relay-ffi", "relay-cli", "relay-netstack", "relay-store", "relay-control", "relayd", "relay-bench", "relay-devices"]
+members = ["relay-model", "relay-proxy", "relay-ffi", "relay-cli", "relay-netstack", "relay-store", "relay-control", "relayd", "relay-bench", "relay-devices", "relay-demo-server"]
 
 [workspace.package]
 version = "0.1.0"

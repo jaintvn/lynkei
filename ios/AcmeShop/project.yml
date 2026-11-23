@@ -8,6 +8,14 @@ targets:
     type: application
     platform: iOS
     sources: [Sources]
+    info:
+      path: Info.plist
+      properties:
+        # The demo talks plain HTTP to the mock server on this Mac / local network.
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+          NSAllowsArbitraryLoads: true
+        NSLocalNetworkUsageDescription: Acme Shop talks to the demo server on your Mac.
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.acme.shop

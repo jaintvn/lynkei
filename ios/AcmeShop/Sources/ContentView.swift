@@ -5,24 +5,45 @@ import SwiftUI
 /// an expired token (401), a slow call and an image. Nothing here knows about Relay, except the
 /// optional `-relayProxy host:port` launch argument (see `makeSession`), which lets the Simulator
 /// demo run without changing the Mac's system proxy.
+///
+/// Calls go to a local mock API (`scripts/demo-server.sh`), so the demo works offline and never
+/// hits a rate limit. The server address defaults to `http://localhost:8099` (the Simulator); on a
+/// real iPhone type your Mac's address into the Server field, or launch with `-mockServer URL`.
+/// "Tip of the day" still goes to api.github.com so there is one real HTTPS call to decrypt.
 struct Call: Identifiable {
     let id = UUID()
     let label: String
     let method: String
+    /// A path on the mock server, or a full URL for the one real HTTPS call.
     let url: String
     var body: String? = nil
 }
 
 let calls: [Call] = [
-    Call(label: "Browse shoes", method: "GET", url: "https://httpbin.org/get?category=shoes&page=2"),
-    Call(label: "Product list", method: "GET", url: "https://httpbin.org/json"),
-    Call(label: "Add to cart", method: "POST", url: "https://httpbin.org/post", body: #"{"sku":"p_8231","qty":1,"price":129.0}"#),
-    Call(label: "Checkout (fails)", method: "POST", url: "https://httpbin.org/status/500", body: #"{"cart":{"items":3,"total":248.9}}"#),
-    Call(label: "Refresh token (401)", method: "POST", url: "https://httpbin.org/status/401", body: #"{"refresh":"expired"}"#),
-    Call(label: "Recommendations (slow)", method: "GET", url: "https://httpbin.org/delay/2"),
-    Call(label: "Product image", method: "GET", url: "https://httpbin.org/image/png"),
+    Call(label: "Browse shoes", method: "GET", url: "/get?category=shoes&page=2"),
+    Call(label: "Product list", method: "GET", url: "/json"),
+    Call(label: "Add to cart", method: "POST", url: "/post", body: #"{"sku":"p_8231","qty":1,"price":129.0}"#),
+    Call(label: "Checkout (fails)", method: "POST", url: "/status/500", body: #"{"cart":{"items":3,"total":248.9}}"#),
+    Call(label: "Refresh token (401)", method: "POST", url: "/status/401", body: #"{"refresh":"expired"}"#),
+    Call(label: "Recommendations (slow)", method: "GET", url: "/delay/2"),
+    Call(label: "Product image", method: "GET", url: "/image/png"),
     Call(label: "Tip of the day", method: "GET", url: "https://api.github.com/zen"),
 ]
+
+let defaultServer = "http://localhost:8099"
+
+/// The mock server's base URL: `-mockServer URL`, else what was typed into the Server field.
+func initialServer() -> String {
+    let args = ProcessInfo.processInfo.arguments
+    if let i = args.firstIndex(of: "-mockServer"), i + 1 < args.count { return args[i + 1] }
+    return UserDefaults.standard.string(forKey: "mockServer") ?? defaultServer
+}
+
+func resolve(_ call: Call, server: String) -> URL? {
+    if call.url.hasPrefix("http") { return URL(string: call.url) }
+    let base = server.trimmingCharacters(in: .whitespaces).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+    return URL(string: base + call.url)
+}
 
 /// A normal session, or one pointed at a proxy when launched with `-relayProxy 127.0.0.1:8888`.
 func makeSession() -> URLSession {
@@ -43,6 +64,7 @@ func makeSession() -> URLSession {
 struct ContentView: View {
     @State private var log: [String] = []
     @State private var running = false
+    @State private var server = initialServer()
     private let session = makeSession()
 
     private let brand = Color(red: 1.0, green: 0.32, blue: 0.47)
@@ -54,6 +76,17 @@ struct ContentView: View {
                 Text("Acme Shop").font(.system(size: 30, weight: .bold)).foregroundStyle(brand)
                 Text("v3.4.1 · demo app for Relay").foregroundStyle(ink.opacity(0.6))
             }
+            HStack {
+                Text("Server").font(.system(size: 12, weight: .semibold)).foregroundStyle(ink.opacity(0.6))
+                TextField(defaultServer, text: $server)
+                    .font(.system(size: 13, design: .monospaced))
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .keyboardType(.URL)
+                    .onChange(of: server) { _, v in UserDefaults.standard.set(v, forKey: "mockServer") }
+            }
+            .padding(10)
+            .background(RoundedRectangle(cornerRadius: 10).fill(.white))
             LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
                 ForEach(calls) { call in
                     Button(call.label) { Task { await run(call) } }
@@ -99,7 +132,11 @@ struct ContentView: View {
 
     private func run(_ call: Call) async {
         let started = Date()
-        var request = URLRequest(url: URL(string: call.url)!)
+        guard let url = resolve(call, server: server) else {
+            log.append("✗ ERR  \(call.label)  ·  bad server address")
+            return
+        }
+        var request = URLRequest(url: url)
         request.httpMethod = call.method
         request.timeoutInterval = 30
         request.setValue("AcmeShop/3.4.1 (iOS)", forHTTPHeaderField: "User-Agent")

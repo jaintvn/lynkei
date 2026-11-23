@@ -96,6 +96,13 @@ extension TrafficStore {
     }
 
     func advice(for tx: FfiTransaction) -> TLSAdvice? {
+        if tx.host == "10.0.2.2", tx.state == .failed, TLSIssue.of(tx) == nil {
+            return TLSAdvice(
+                title: "10.0.2.2 only exists inside the Android emulator",
+                cause: "That address is the emulator's name for your Mac. A real phone can't reach it, so Relay's connection timed out.",
+                steps: ["Point the app at a server the phone can reach, for example https://httpbin.org.",
+                        "Or, for a server on this Mac, run `adb reverse tcp:8099 tcp:8099` and use http://127.0.0.1:8099 in the app."])
+        }
         guard let issue = TLSIssue.of(tx) else { return nil }
         let device = Analytics.deviceLabel(tx)
         return TLSAdvice.make(issue, platform: Analytics.platform(ofDevice: device), certInstalled: deviceDecrypts(device), host: tx.host)

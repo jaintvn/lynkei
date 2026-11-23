@@ -105,6 +105,7 @@ struct MacCertificateCard: View {
             .padding(12)
             .background(RoundedRectangle(cornerRadius: 10).fill(Theme.panel))
             .overlay(RoundedRectangle(cornerRadius: 10).stroke(Theme.line))
+            MacProxyRow()
             if let m = cert.message { Text(m).font(.system(size: 12)).foregroundStyle(Theme.muted) }
             HStack {
                 Text("Adds it to your login keychain. macOS asks for your password.").font(.system(size: 11.5)).foregroundStyle(Theme.faint)
@@ -116,5 +117,48 @@ struct MacCertificateCard: View {
         .background(RoundedRectangle(cornerRadius: 14).fill(Theme.raised))
         .overlay(RoundedRectangle(cornerRadius: 14).stroke(Theme.line))
         .onAppear { cert.refresh() }
+    }
+}
+
+/// "Mac proxy" status inside the This Mac card.
+struct MacProxyRow: View {
+    @Environment(TrafficStore.self) private var traffic
+    private let proxy = MacProxyStatus.shared
+
+    var body: some View {
+        let (ok, title, detail) = describe()
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: ok ? "checkmark.circle.fill" : "exclamationmark.triangle.fill").foregroundStyle(ok ? Theme.s2xx : Theme.s4xx)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(.system(size: 12.5, weight: .medium))
+                Text(detail).font(.system(size: 11.5)).foregroundStyle(Theme.muted).fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Theme.panel))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Theme.line))
+        .task {
+            while !Task.isCancelled {
+                proxy.refresh(relayPort: traffic.port)
+                try? await Task.sleep(for: .seconds(2))
+            }
+        }
+    }
+
+    private func describe() -> (Bool, String, String) {
+        switch proxy.state {
+        case .relay(let port):
+            return (true, "Mac proxy is on (127.0.0.1:\(port))", "iOS Simulators and this Mac's apps send their traffic through Relay.")
+        case .off:
+            return (false, "Mac proxy is off", "iOS Simulators and Mac apps are not going through Relay. Connect a simulator to turn it on. If it turns itself off, a VPN or company profile is resetting it.")
+        case .other(let who):
+            return (false, "Mac proxy points elsewhere (\(who))", "Another tool or a company profile set the proxy, so traffic skips Relay. Connect a simulator to switch it to Relay.")
+        case .pac(let url):
+            return (false, "A proxy auto-config script is on", "\(url.isEmpty ? "A script" : url) can send traffic around Relay. This usually comes from a company profile or VPN; ask IT, or turn it off in System Settings → Network → Details → Proxies.")
+        case .unknown:
+            return (false, "Mac proxy: checking…", "")
+        }
     }
 }

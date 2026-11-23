@@ -141,6 +141,18 @@ struct DeviceCard: View {
             if let message = store.errors[device.id] {
                 Text(message).font(.system(size: 12)).foregroundStyle(Theme.s5xx)
             }
+            if device.kind == "ios_simulator", connected, !MacProxyStatus.shared.isRelay, MacProxyStatus.shared.state != .unknown {
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Theme.s4xx)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("The Mac's proxy is off, so this simulator is not going through Relay.").font(.system(size: 12, weight: .medium))
+                        Button("Turn the proxy on again") { Task { await store.connect(device) } }
+                            .buttonStyle(PillButtonStyle()).font(.system(size: 12, weight: .medium))
+                    }
+                }
+                .padding(10)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Theme.s4xx.opacity(0.10)))
+            }
             Button(action: {
                 Task { connected ? await store.disconnect(device) : await store.connect(device) }
             }) {

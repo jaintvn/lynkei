@@ -7,6 +7,7 @@ pub mod ca;
 pub mod client;
 pub mod procinfo;
 mod proxy;
+pub mod rules;
 pub mod setup;
 pub mod sniff;
 pub mod tee;

@@ -470,6 +470,7 @@ mod tests {
             client_addr: "10.0.0.2:5000".into(),
             websocket_messages: vec![],
             client_process: None,
+            applied_rules: vec![],
         }
     }
 

@@ -79,6 +79,23 @@ pub fn body_preview(headers: &HeaderMap, body: &[u8], max_bytes: usize) -> Optio
     Some(text)
 }
 
+/// The body with any gzip/deflate content-encoding removed. `None` for encodings Relay cannot decode.
+pub fn decode_body(headers: &HeaderMap, body: &[u8], max_bytes: usize) -> Option<Vec<u8>> {
+    let encoding = headers
+        .get(header::CONTENT_ENCODING)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    match encoding.as_str() {
+        "" | "identity" => Some(body.to_vec()),
+        "gzip" | "x-gzip" => inflate(flate2::read::GzDecoder::new(body), max_bytes),
+        "deflate" => inflate(flate2::read::ZlibDecoder::new(body), max_bytes)
+            .or_else(|| inflate(flate2::read::DeflateDecoder::new(body), max_bytes)),
+        _ => None,
+    }
+}
+
 /// Decompresses up to `max_bytes`. Keeps whatever decoded before an error, because streamed bodies
 /// are captured only up to a limit and the compressed tail may be missing.
 fn inflate(mut r: impl Read, max_bytes: usize) -> Option<Vec<u8>> {

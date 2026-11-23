@@ -145,6 +145,7 @@ impl Engine {
         let mut cfg = ProxyConfig::new(listen, &self.opts.data_dir);
         cfg.extra_upstream_roots = self.opts.extra_upstream_roots.clone();
         let handle = relay_proxy::start(cfg, self.sink.clone()).await?;
+        handle.set_rules(self.rules.lock().unwrap().clone(), &self.opts.data_dir);
         let port = handle.local_addr.port();
         *guard = Some(handle);
         Ok(port)
@@ -267,6 +268,9 @@ impl Engine {
                 }
                 write_atomic(&self.opts.data_dir.join(RULES_FILE), yaml.as_bytes())
                     .map_err(engine_err)?;
+                if let Some(h) = self.proxy.lock().await.as_ref() {
+                    h.set_rules(set.clone(), &self.opts.data_dir);
+                }
                 *self.rules.lock().unwrap() = set;
                 Ok(json!({ "saved": true, "problems": [] }))
             }

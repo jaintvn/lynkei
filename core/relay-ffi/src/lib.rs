@@ -65,6 +65,8 @@ pub struct FfiTransaction {
     pub websocket_messages: Vec<FfiWsMessage>,
     /// The program on this Mac that made the request, when known.
     pub client_process: Option<String>,
+    /// Ids of the rules that changed or answered this exchange.
+    pub applied_rules: Vec<String>,
 }
 
 impl From<Transaction> for FfiTransaction {
@@ -117,6 +119,7 @@ impl From<Transaction> for FfiTransaction {
                 })
                 .collect(),
             client_process: t.client_process,
+            applied_rules: t.applied_rules,
         }
     }
 }
@@ -161,6 +164,7 @@ impl From<&FfiTransaction> for Transaction {
             client_addr: t.client_addr.clone(),
             websocket_messages: vec![],
             client_process: t.client_process.clone(),
+            applied_rules: t.applied_rules.clone(),
         }
     }
 }
@@ -285,6 +289,12 @@ pub struct VpnStats {
     pub tcp_connections: u64,
     pub udp_flows: u64,
     pub quic_blocked: u64,
+}
+
+fn load_rules(dir: &std::path::Path) -> Option<relay_model::rules::RuleSet> {
+    let text = std::fs::read_to_string(dir.join("rules.yaml")).ok()?;
+    let set = relay_model::rules::RuleSet::from_yaml(&text).ok()?;
+    set.validate().is_empty().then_some(set)
 }
 
 #[derive(uniffi::Object)]
@@ -517,9 +527,32 @@ impl RelayEngine {
         );
         *self.store.lock().unwrap() = Some(store);
         let handle = self.runtime.block_on(relay_proxy::start(cfg, sink))?;
+        if let Some(set) = load_rules(&self.data_dir) {
+            handle.set_rules(set, &self.data_dir);
+        }
         let port = handle.local_addr.port();
         *guard = Some(handle);
         Ok(port)
+    }
+
+    /// Validates and applies rules (the YAML format in `rules.yaml`) and saves them. Returns the
+    /// problems found; nothing is applied unless the list is empty.
+    pub fn set_rules(&self, yaml: String) -> Vec<String> {
+        let set = match relay_model::rules::RuleSet::from_yaml(&yaml) {
+            Ok(s) => s,
+            Err(e) => return vec![e],
+        };
+        let problems: Vec<String> = set.validate().iter().map(|p| p.to_string()).collect();
+        if !problems.is_empty() {
+            return problems;
+        }
+        if let Err(e) = std::fs::write(self.data_dir.join("rules.yaml"), yaml) {
+            return vec![format!("saving rules.yaml: {e}")];
+        }
+        if let Some(h) = self.handle.lock().unwrap().as_ref() {
+            h.set_rules(set, &self.data_dir);
+        }
+        vec![]
     }
 
     pub fn stop(&self) {

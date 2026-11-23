@@ -95,6 +95,9 @@ pub struct Transaction {
     /// Only available for connections from this Mac (including iOS Simulator apps).
     #[serde(default)]
     pub client_process: Option<String>,
+    /// Ids of the rules that changed or answered this exchange.
+    #[serde(default)]
+    pub applied_rules: Vec<String>,
 }
 
 fn default_version() -> String {
@@ -154,6 +157,7 @@ mod tests {
             client_addr: "127.0.0.1:5000".into(),
             websocket_messages: vec![],
             client_process: None,
+            applied_rules: vec![],
         }
     }
 

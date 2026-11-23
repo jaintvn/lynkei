@@ -376,6 +376,14 @@ The Mac's notch island has three Android equivalents, all driven by the same con
 - Not yet verified: tapping Connect on the iOS Simulator card in the app (it would change this Mac's real system proxy; the same code path is verified against the real simulator with a fake system-proxy backend), a real iPhone installing the profile, and a physical USB Android phone.
 - Known gaps: "Traffic seen" counts any request after connecting, not per device (adb-reverse and simulator traffic both arrive from 127.0.0.1); the app has no guard process, so a crash while a simulator is connected relies on the next launch to restore the system proxy (relayd already has the guard).
 
+**P2 progress — App column and search (2026-11-23):** the Mac app's search box now uses the shared filter language, requests show the Mac program that made them (`lsof`, macOS; re-sent once known), and an "All apps" menu limits the list to one program (`app:` / `client:` terms; `TrafficFilter` exposed over UniFFI).
+
+**P3 progress — rules engine, first slice (2026-11-23):**
+- ✅ `relay-proxy::rules` applies the rules YAML to live HTTP(S) traffic: **block**, **map local** (file next to rules.yaml, content-type guessed), **map remote** (scheme/host swap with path prefix, optional preserved Host), **rewrite** (request/response/both: set/remove header, set status, set/remove JSON path, literal or regex body replace, delay; gzip/deflate decoded, bodies up to 32 MB), **throttle** (presets and custom: latency, bandwidth delay from Content-Length, loss, offline). Matchers include the search-language `filter`.
+- Transactions carry `applied_rules` (model, store, FFI); control API `rules.set` and the FFI `set_rules` apply live, and both engines load `rules.yaml` at start.
+- Tests: 4 unit (JSON paths, regex, presets) and 3 end-to-end (block + map local, rewrite + map remote, throttle delay/drop).
+- Not done: **breakpoints** (need the editor UI and a pause/resume channel in the proxy), rules on WebSocket/tunnel traffic, per-chunk bandwidth shaping, Mac rule screens, HAR import/export, Compose/Repeat, DNS spoof.
+
 **Deferred from P1 (and why):**
 - Signed privileged helper via SMAppService: needs a Developer ID; the unprivileged guard covers crash safety in the meantime.
 - Transparent mode (pf redirect): needs root, so it waits for the signed helper.

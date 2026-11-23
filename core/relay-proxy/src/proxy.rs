@@ -32,8 +32,9 @@ use tokio_rustls::TlsAcceptor;
 
 use crate::body::{body_preview, strip_hop_by_hop};
 use crate::ca::{CertAuthority, SniResolver};
+use crate::rules::{self, Early, RulesHook};
 use crate::sniff;
-use crate::tee::{ProxyBody, TeeBody, TeeOutcome, full};
+use crate::tee::{BoxError, ProxyBody, TeeBody, TeeOutcome, full};
 use crate::{EventSink, ProxyConfig};
 
 /// Magic host that serves the Relay CA certificate (open http://relay.ca on a device).
@@ -56,6 +57,7 @@ pub(crate) struct Shared {
     learned_passthrough: std::sync::Mutex<std::collections::HashSet<String>>,
     procs: Arc<ProcCache>,
     listen_port: u16,
+    rules: RulesHook,
 }
 
 /// Client port → program, filled from `lsof` snapshots (see `procinfo`).
@@ -171,6 +173,11 @@ impl ProxyHandle {
     pub fn ca_path(&self) -> &std::path::Path {
         self.shared.ca.ca_path()
     }
+    /// Replaces the active rules. `base` is the folder `map_local` files are read from.
+    pub fn set_rules(&self, set: relay_model::rules::RuleSet, base: impl Into<std::path::PathBuf>) {
+        self.shared.rules.set(rules::ActiveRules::new(set, base));
+    }
+
     pub fn shutdown(&mut self) {
         if let Some(tx) = self.shutdown.take() {
             let _ = tx.send(());
@@ -245,6 +252,7 @@ pub async fn start(cfg: ProxyConfig, sink: Arc<dyn EventSink>) -> Result<ProxyHa
         learned_passthrough: Default::default(),
         procs,
         listen_port: local_addr.port(),
+        rules: RulesHook::default(),
     });
     let (tx, mut rx) = oneshot::channel();
 
@@ -689,11 +697,71 @@ async fn forward(
     t.http_version = version_str(parts.version).to_owned();
     t.request_headers = to_headers(&parts.headers);
 
+    // Rules: some answer without the server (block, map local, throttle drop), the rest edit.
+    let active = shared.rules.get();
+    let matched = active.matching(&t);
+    if let Some(early) = active.early(&matched).await {
+        return answer_early(shared, t, started, early);
+    }
+    let mut applied: Vec<String> = vec![];
+    let note = |applied: &mut Vec<String>, id: &str| {
+        if !applied.iter().any(|a| a == id) {
+            applied.push(id.to_owned());
+        }
+    };
+    let req_edits = active.edits(&matched, relay_model::rules::Phase::Request);
+    let mut headers = parts.headers.clone();
+    let mut body: ProxyBody = body.map_err(|e| -> BoxError { Box::new(e) }).boxed();
+    if !req_edits.is_empty() {
+        for (id, _) in &req_edits {
+            note(&mut applied, id);
+        }
+        rules::apply_headers(&req_edits, &mut headers, None);
+        if rules::has_body_edit(&req_edits) {
+            match body.collect().await {
+                Ok(c) => {
+                    let b = rules::rewrite_body(&req_edits, &mut headers, c.to_bytes());
+                    body = full(b);
+                }
+                Err(e) => {
+                    return fail(
+                        shared,
+                        t,
+                        started,
+                        StatusCode::BAD_REQUEST,
+                        format!("reading request body: {e}"),
+                    );
+                }
+            }
+        }
+        let wait = rules::edit_delay(&req_edits);
+        if !wait.is_zero() {
+            tokio::time::sleep(wait).await;
+        }
+        t.request_headers = to_headers(&headers);
+    }
+    let (mut target_scheme, mut target_authority, mut target_path) =
+        (scheme.to_owned(), authority.clone(), path.clone());
+    let mut keep_host = None;
+    if let Some(remote) = active.remote(&matched) {
+        note(&mut applied, &remote.rule);
+        target_scheme = remote.scheme;
+        target_authority = remote.authority;
+        target_path = format!("{}{}", remote.path_prefix, path);
+        if remote.preserve_host {
+            keep_host = Some(authority.clone());
+        }
+    }
+    let throttle = active.throttle(&matched);
+    if let Some((id, _)) = &throttle {
+        note(&mut applied, id);
+    }
+
     // Stream the request upstream while keeping a bounded copy for the inspector.
     let (req_tee, req_done) = TeeBody::new(body, shared.cfg.max_preview_bytes);
-    let req_tee = req_tee.with_expected_len(content_length(&parts.headers));
+    let req_tee = req_tee.with_expected_len(content_length(&headers));
 
-    let uri: Uri = match format!("{scheme}://{authority}{path}").parse() {
+    let uri: Uri = match format!("{target_scheme}://{target_authority}{target_path}").parse() {
         Ok(u) => u,
         Err(e) => {
             return fail(
@@ -709,12 +777,15 @@ async fn forward(
         .method(parts.method.clone())
         .uri(uri)
         .version(Version::HTTP_11);
-    let mut headers = parts.headers.clone();
+    let req_headers = headers.clone();
     strip_hop_by_hop(&mut headers);
     headers.remove(HeaderName::from_static("proxy-authorization"));
     // The target URI carries the authority. hyper's client writes `Host` from it on HTTP/1.1 and
     // `:authority` on HTTP/2; a copied `Host` on HTTP/2 is rejected by strict servers (Google's GFE).
     headers.remove(header::HOST);
+    if let Some(h) = keep_host.and_then(|h| HeaderValue::from_str(&h).ok()) {
+        headers.insert(header::HOST, h);
+    }
     *out.headers_mut().unwrap() = headers;
     let out = match out.body(req_tee.boxed()) {
         Ok(r) => r,
@@ -756,9 +827,54 @@ async fn forward(
             );
         }
     };
-    let (rparts, rbody) = resp.into_parts();
-    t.status = Some(rparts.status.as_u16());
+    let (mut rparts, rbody) = resp.into_parts();
+    let mut rbody: ProxyBody = rbody.map_err(|e| -> BoxError { Box::new(e) }).boxed();
     t.upstream_http_version = Some(version_str(rparts.version).to_owned());
+    t.status = Some(rparts.status.as_u16());
+    t.response_headers = to_headers(&rparts.headers);
+    let matched = active.matching(&t);
+    let resp_edits = active.edits(&matched, relay_model::rules::Phase::Response);
+    let throttle = throttle.or_else(|| active.throttle(&matched));
+    if let Some((id, _)) = &throttle
+        && !applied.contains(id)
+    {
+        applied.push(id.clone());
+    }
+    if !resp_edits.is_empty() {
+        for (id, _) in &resp_edits {
+            note(&mut applied, id);
+        }
+        rules::apply_headers(&resp_edits, &mut rparts.headers, Some(&mut rparts.status));
+        if rules::has_body_edit(&resp_edits) {
+            match rbody.collect().await {
+                Ok(c) => {
+                    let b = rules::rewrite_body(&resp_edits, &mut rparts.headers, c.to_bytes());
+                    rbody = full(b);
+                }
+                Err(e) => {
+                    return fail(
+                        shared,
+                        t,
+                        started,
+                        StatusCode::BAD_GATEWAY,
+                        format!("reading response body: {e}"),
+                    );
+                }
+            }
+        }
+        let wait = rules::edit_delay(&resp_edits);
+        if !wait.is_zero() {
+            tokio::time::sleep(wait).await;
+        }
+    }
+    if let Some((_, th)) = &throttle {
+        let wait = th.delay_for(content_length(&rparts.headers));
+        if !wait.is_zero() {
+            tokio::time::sleep(wait).await;
+        }
+    }
+    t.applied_rules = applied;
+    t.status = Some(rparts.status.as_u16());
     t.response_headers = to_headers(&rparts.headers);
     // Show the exchange immediately; the final event (same id) follows when the body ends.
     let mut open = t.clone();
@@ -772,7 +888,7 @@ async fn forward(
     let resp_tee = resp_tee.with_expected_len(content_length(&rparts.headers));
     let sink = shared.sink.clone();
     let max = shared.cfg.max_preview_bytes;
-    let (req_headers, resp_headers) = (parts.headers.clone(), rparts.headers.clone());
+    let resp_headers = rparts.headers.clone();
     tokio::spawn(async move {
         let req = req_done.await.unwrap_or_default();
         let resp = resp_done.await.unwrap_or_default();
@@ -1044,6 +1160,49 @@ fn preview(headers: &HeaderMap, o: &TeeOutcome, max: usize) -> Option<String> {
     Some(p)
 }
 
+/// Answers from a rule (block, map local) or drops the request (offline / lossy throttle).
+fn answer_early(
+    shared: &Shared,
+    mut t: Transaction,
+    started: Instant,
+    early: Early,
+) -> Response<ProxyBody> {
+    match early {
+        Early::Drop { rule, reason } => {
+            t.applied_rules = vec![rule];
+            fail(shared, t, started, StatusCode::BAD_GATEWAY, reason)
+        }
+        Early::Respond {
+            rule,
+            status,
+            headers,
+            body,
+        } => {
+            let code = StatusCode::from_u16(status).unwrap_or(StatusCode::OK);
+            let mut response = Response::new(full(body.clone()));
+            *response.status_mut() = code;
+            for (k, v) in &headers {
+                if let (Ok(n), Ok(v)) = (
+                    HeaderName::from_bytes(k.as_bytes()),
+                    HeaderValue::from_str(v),
+                ) {
+                    response.headers_mut().insert(n, v);
+                }
+            }
+            t.status = Some(code.as_u16());
+            t.response_headers = to_headers(response.headers());
+            t.response_body_size = body.len() as u64;
+            t.response_body_preview =
+                body_preview(response.headers(), &body, shared.cfg.max_preview_bytes);
+            t.state = TransactionState::Complete;
+            t.duration_ms = started.elapsed().as_millis() as u64;
+            t.applied_rules = vec![rule];
+            shared.sink.on_transaction(t);
+            response
+        }
+    }
+}
+
 fn fail(
     shared: &Shared,
     mut t: Transaction,
@@ -1116,6 +1275,7 @@ fn base_transaction(
         client_addr: peer.to_string(),
         websocket_messages: vec![],
         client_process: None,
+        applied_rules: vec![],
     }
 }
 

@@ -1189,3 +1189,174 @@ async fn labelling_can_be_turned_off() {
     let t = wait_for(&log, 1).await.remove(0);
     assert_eq!(t.client_process, None);
 }
+
+fn rules(yaml: &str) -> relay_model::rules::RuleSet {
+    let set = relay_model::rules::RuleSet::from_yaml(yaml).unwrap();
+    assert!(set.validate().is_empty(), "{:?}", set.validate());
+    set
+}
+
+#[tokio::test]
+async fn block_and_map_local_rules_answer_without_the_server() {
+    let http_port = start_http_origin().await;
+    let (_p, origin_ca) = start_https_origin().await;
+    let (proxy, log, _ca) = start_proxy(origin_ca, &[]).await;
+    let dir = std::env::temp_dir().join(format!("relay-rules-{}", rand_suffix()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("mock.json"), r#"{"mocked":true}"#).unwrap();
+    proxy.set_rules(
+        rules(
+            r#"
+version: 1
+rules:
+  - id: no-ads
+    kind: block
+    match: { path: /ads }
+  - id: mock-products
+    kind: map_local
+    match: { path: /products }
+    file: mock.json
+    status: 201
+"#,
+        ),
+        &dir,
+    );
+
+    let blocked = fetch_via_proxy(
+        proxy.local_addr,
+        &format!("http://127.0.0.1:{http_port}/ads/1"),
+        &[],
+    )
+    .await
+    .unwrap();
+    assert_eq!(blocked.status, 403);
+    let mocked = fetch_via_proxy(
+        proxy.local_addr,
+        &format!("http://127.0.0.1:{http_port}/products?page=2"),
+        &[],
+    )
+    .await
+    .unwrap();
+    assert_eq!(mocked.status, 201);
+    assert_eq!(String::from_utf8_lossy(&mocked.body), r#"{"mocked":true}"#);
+    let untouched = fetch_via_proxy(
+        proxy.local_addr,
+        &format!("http://127.0.0.1:{http_port}/other"),
+        &[],
+    )
+    .await
+    .unwrap();
+    assert!(String::from_utf8_lossy(&untouched.body).contains("\"items\""));
+
+    let txs = wait_for(&log, 3).await;
+    let by_path = |p: &str| txs.iter().find(|t| t.path.starts_with(p)).unwrap();
+    assert_eq!(by_path("/ads").applied_rules, ["no-ads"]);
+    assert_eq!(by_path("/products").applied_rules, ["mock-products"]);
+    assert_eq!(by_path("/products").state, TransactionState::Complete);
+    assert!(by_path("/other").applied_rules.is_empty());
+}
+
+#[tokio::test]
+async fn rewrite_rules_edit_responses_and_map_remote_redirects() {
+    let a = start_http_origin().await;
+    let b = start_http_origin().await;
+    let (_p, origin_ca) = start_https_origin().await;
+    let (proxy, log, _ca) = start_proxy(origin_ca, &[]).await;
+    proxy.set_rules(
+        rules(&format!(
+            r#"
+version: 1
+rules:
+  - id: flags
+    kind: rewrite
+    match: {{ path: /flags }}
+    phase: response
+    actions:
+      - set_json: {{ path: "$.items[0]", value: 99 }}
+      - remove_json: {{ path: $.version }}
+      - set_header: {{ name: x-mocked, value: "yes" }}
+      - set_status: 202
+  - id: staging
+    kind: map_remote
+    match: {{ path: /v2 }}
+    to: http://127.0.0.1:{b}/staging
+"#
+        )),
+        ".",
+    );
+
+    let res = fetch_via_proxy(
+        proxy.local_addr,
+        &format!("http://127.0.0.1:{a}/flags"),
+        &[],
+    )
+    .await
+    .unwrap();
+    assert_eq!(res.status, 202);
+    let v: serde_json::Value = serde_json::from_slice(&res.body).unwrap();
+    assert_eq!(v["items"][0], 99);
+    assert!(v.get("version").is_none());
+
+    let moved = fetch_via_proxy(
+        proxy.local_addr,
+        &format!("http://127.0.0.1:{a}/v2/x?y=1"),
+        &[],
+    )
+    .await
+    .unwrap();
+    // The origin on `b` echoes the path it received.
+    assert!(
+        String::from_utf8_lossy(&moved.body).contains("/staging/v2/x?y=1"),
+        "{}",
+        String::from_utf8_lossy(&moved.body)
+    );
+
+    let txs = wait_for(&log, 2).await;
+    let flags = txs.iter().find(|t| t.path == "/flags").unwrap();
+    assert_eq!(flags.applied_rules, ["flags"]);
+    assert_eq!(flags.status, Some(202));
+    assert!(flags.response_headers.iter().any(|h| h.name == "x-mocked"));
+}
+
+#[tokio::test]
+async fn throttle_rules_delay_or_drop() {
+    let a = start_http_origin().await;
+    let (_p, origin_ca) = start_https_origin().await;
+    let (proxy, log, _ca) = start_proxy(origin_ca, &[]).await;
+    proxy.set_rules(
+        rules(
+            r#"
+version: 1
+rules:
+  - id: slow
+    kind: throttle
+    match: { path: /slow }
+    profile: { latency_ms: 400 }
+  - id: off
+    kind: throttle
+    match: { path: /offline }
+    profile: offline
+"#,
+        ),
+        ".",
+    );
+    let t0 = std::time::Instant::now();
+    let slow = fetch_via_proxy(proxy.local_addr, &format!("http://127.0.0.1:{a}/slow"), &[])
+        .await
+        .unwrap();
+    assert_eq!(slow.status, 200);
+    assert!(t0.elapsed() >= Duration::from_millis(400));
+    let off = fetch_via_proxy(
+        proxy.local_addr,
+        &format!("http://127.0.0.1:{a}/offline"),
+        &[],
+    )
+    .await
+    .unwrap();
+    assert_eq!(off.status, 502);
+    let txs = wait_for(&log, 2).await;
+    assert_eq!(
+        txs.iter().find(|t| t.path == "/offline").unwrap().state,
+        TransactionState::Failed
+    );
+}

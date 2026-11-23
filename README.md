@@ -92,6 +92,30 @@ Bare words match the URL, headers and bodies. `app:` is the program on this Mac 
 
 In the Mac app the search box uses this language, the **App** column shows which program made each request, and the **All apps** menu limits the list to one program, so a Simulator app's calls are not buried under the rest of your Mac's traffic.
 
+### Rules
+
+Rules live in `rules.yaml` in Relay's data folder (`rules.set` over the control API, or `relay rules push`, applies them live; the Mac app reads the file when it starts). A request's row lists the rules that touched it (`applied_rules`).
+
+```yaml
+version: 1
+rules:
+  - { id: no-ads, kind: block, match: { host: ads.example.com } }
+  - id: mock-products
+    kind: map_local            # answer from a file next to rules.yaml
+    match: { path: /v2/products }
+    file: products.json
+  - id: flags
+    kind: rewrite              # edit the response; quote JSON paths that contain [ ]
+    match: { path: /v2/feature-flags }
+    actions:
+      - set_json: { path: $.flags.new_checkout, value: true }
+      - set_status: 200
+  - { id: staging, kind: map_remote, match: { host: api.acme.com }, to: "https://staging.acme.com" }
+  - { id: slow, kind: throttle, match: { path: /images }, profile: 3g }
+```
+
+Applied today: block, map local, map remote, rewrite (headers, status, JSON paths, text/regex replace, delay; gzip bodies are decoded) and throttle (latency, rough bandwidth delay from `Content-Length`, loss, offline). Not yet: breakpoints, and rewriting WebSocket or tunneled traffic.
+
 ## Mac app
 
 ```bash

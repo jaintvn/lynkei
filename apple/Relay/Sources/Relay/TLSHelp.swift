@@ -80,7 +80,7 @@ struct TLSAdvice {
                 return TLSAdvice(
                     title: "The app rejected Relay's certificate\(h)",
                     cause: "This program doesn't trust the Relay CA, or it pins its server certificate.",
-                    steps: ["Trust the Relay CA in Keychain Access (System keychain → Always Trust), or export it from the Connect screen.",
+                    steps: ["Trust the Relay CA: in Terminal run  security add-trusted-cert -r trustRoot -k ~/Library/Keychains/login.keychain-db \"$HOME/Library/Application Support/Relay/relay-ca.pem\"  (or open that file and set Always Trust in Keychain Access).",
                             "Apps that use their own certificate list (Firefox, Java, Node) need the CA added to that list.",
                             "Then press Try decrypting again."],
                     action: "retry", actionTitle: "Try decrypting again")

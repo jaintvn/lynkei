@@ -62,9 +62,8 @@ jobs:
           java-version: "21"
       - run: cargo install cargo-ndk --locked
       - name: Build engine, CLI and Kotlin bindings
-        env:
-          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_LATEST_HOME }}
         run: |
+          export ANDROID_NDK_HOME="$ANDROID_NDK_ROOT"
           (cd core && cargo ndk -t arm64-v8a --platform 26 build -p relay-cli -p relayd --release)
           scripts/build-android.sh
       - name: Build APK

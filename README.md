@@ -166,6 +166,10 @@ Changes are grouped under **Request** and **Response** tabs. **Save rule** appli
 
 **Compose** (toolbar) sends a request you write; **Repeat** and **Edit & Repeat…** in a request's right-click menu resend a captured one, optionally edited. You can send it up to 200 times, one by one or all at once, which is handy for retry and race checks. The requests go through Relay, so they show up in the list and your rules and breakpoints apply to them. Only the text of a captured body is copied, so a binary or very large body needs to be pasted in.
 
+## Trust the certificate on this Mac
+
+Like Charles' "Install Charles Root Certificate": press **Install** in the *This Mac* card on the Connect screen, or choose **Help → Install Relay Certificate on This Mac…**. It adds Relay's certificate to your login keychain as a trusted root (macOS asks for your password). Firefox, Java and Node keep their own certificate lists and need the same `relay-ca.pem` added by hand.
+
 ## Logs, scenarios, GraphQL, gRPC, analytics, sharing
 
 - **Logs:** with a simulator or Android device running, the inspector gets a *Logs* tab: what the app logged within 2 seconds of the call, with offsets from the request. Streams `simctl spawn … log stream` and `adb logcat`; turn it off in the `…` menu (*Capture device logs*).

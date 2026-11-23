@@ -80,10 +80,11 @@ struct TLSAdvice {
                 return TLSAdvice(
                     title: "The app rejected Relay's certificate\(h)",
                     cause: "This program doesn't trust the Relay CA, or it pins its server certificate.",
-                    steps: ["Trust the Relay CA: in Terminal run  security add-trusted-cert -r trustRoot -k ~/Library/Keychains/login.keychain-db \"$HOME/Library/Application Support/Relay/relay-ca.pem\"  (or open that file and set Always Trust in Keychain Access).",
+                    steps: ["Press Install certificate below (or Help → Install Relay Certificate on This Mac). macOS asks for your password.",
+                            "Without the button, in Terminal run  security add-trusted-cert -r trustRoot -k ~/Library/Keychains/login.keychain-db \"$HOME/Library/Application Support/Relay/relay-ca.pem\"  (or open that file and set Always Trust in Keychain Access).",
                             "Apps that use their own certificate list (Firefox, Java, Node) need the CA added to that list.",
                             "Then press Try decrypting again."],
-                    action: "retry", actionTitle: "Try decrypting again")
+                    action: "installMac", actionTitle: "Install certificate")
             }
         }
     }
@@ -111,6 +112,7 @@ extension TrafficStore {
     func perform(_ advice: TLSAdvice) {
         switch advice.action {
         case "retry": retryDecrypting()
+        case "installMac": MacCertificate.shared.install()
         case "enable": setDecrypt(true)
         default: break
         }

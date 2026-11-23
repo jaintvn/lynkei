@@ -42,6 +42,12 @@ struct ContentView: View {
         .foregroundStyle(Theme.fg)
         .environment(sheets)
         .task {
+            if ProcessInfo.processInfo.environment["RELAY_OPEN_CONNECT"] != nil {
+                try? await Task.sleep(for: .seconds(2))
+                sheets.showConnect = true
+            }
+        }
+        .task {
             // For demos and screenshots: open the Rewrite editor on the newest call that has a JSON response.
             guard ProcessInfo.processInfo.environment["RELAY_OPEN_REWRITE"] != nil else { return }
             try? await Task.sleep(for: .seconds(4))

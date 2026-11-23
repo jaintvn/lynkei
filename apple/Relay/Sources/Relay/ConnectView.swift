@@ -16,6 +16,7 @@ struct ConnectView: View {
             ScrollView {
                 if let devices {
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 300), spacing: 16, alignment: .top)], spacing: 16) {
+                        MacCertificateCard()
                         ForEach(devices.devices, id: \.id) { d in
                             DeviceCard(device: d, store: devices, trafficSeen: trafficSeen(after: devices.results[d.id]?.connectedAtMs))
                         }

@@ -20,6 +20,7 @@ struct RelayApp: App {
                 .frame(minWidth: 1400, minHeight: 700)
                 .onAppear {
                     store.start()
+                    MacCertificate.shared.onInstalled = { store.retryDecrypting() }
                     island.start()
                 }
                 .onOpenURL { url in SessionIO.open(url, store: store) }
@@ -28,6 +29,10 @@ struct RelayApp: App {
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 1440, height: 900)
         .commands {
+            CommandGroup(after: .help) {
+                Button("Install Relay Certificate on This Mac…") { MacCertificate.shared.install() }
+                Button("Show Relay Certificate in Finder") { MacCertificate.shared.revealFile() }
+            }
             CommandGroup(after: .newItem) {
                 Button("Open Session…") { SessionIO.open(store: store) }.keyboardShortcut("o")
                 Button("Share Session…") { SessionIO.share(store: store) }.keyboardShortcut("s", modifiers: [.command, .shift])

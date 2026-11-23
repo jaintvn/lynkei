@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -215,23 +215,6 @@ impl Networksetup {
             port: field("Port:").parse().unwrap_or(0),
         }
     }
-
-    fn write_endpoint(service: &str, kind: &str, e: &Endpoint) -> Result<()> {
-        if e.enabled || !e.host.is_empty() {
-            Self::run(&[
-                &format!("-set{kind}proxy"),
-                service,
-                &e.host,
-                &e.port.to_string(),
-            ])?;
-        }
-        Self::run(&[
-            &format!("-set{kind}proxystate"),
-            service,
-            if e.enabled { "on" } else { "off" },
-        ])?;
-        Ok(())
-    }
 }
 
 impl SystemProxyBackend for Networksetup {
@@ -274,18 +257,95 @@ impl SystemProxyBackend for Networksetup {
     }
 
     fn write(&self, service: &str, s: &ProxySettings) -> Result<()> {
-        Self::write_endpoint(service, "web", &s.web)?;
-        Self::write_endpoint(service, "secureweb", &s.secure)?;
-        let mut args = vec!["-setproxybypassdomains", service];
-        let empty = "Empty".to_string();
-        if s.bypass.is_empty() {
-            args.push(&empty);
-        } else {
-            args.extend(s.bypass.iter().map(String::as_str));
+        let commands = Self::commands(service, s);
+        for c in &commands {
+            let args: Vec<&str> = c.iter().map(String::as_str).collect();
+            if let Err(first) = Self::run(&args) {
+                // Some Macs (managed ones, or accounts that are not administrators) refuse the change
+                // unless an administrator approves it. Ask once for all the commands together.
+                if std::env::var_os("RELAY_NO_ADMIN_PROMPT").is_some() {
+                    return Err(first);
+                }
+                return Self::run_with_admin_prompt(&commands).map_err(|second| {
+                    let by_hand = if s.web.enabled {
+                        format!(
+                            " To set it yourself: System Settings → Network → {service} → Details → Proxies, switch on Web proxy and Secure web proxy, host {}, port {}.",
+                            s.web.host, s.web.port
+                        )
+                    } else {
+                        String::new()
+                    };
+                    anyhow!("{first} Asking for an administrator password also failed ({second}); this Mac may only allow IT to change proxy settings.{by_hand}")
+                });
+            }
         }
-        Self::run(&args)?;
         Ok(())
     }
+}
+
+impl Networksetup {
+    /// Every `networksetup` call needed to apply `s`, in order.
+    fn commands(service: &str, s: &ProxySettings) -> Vec<Vec<String>> {
+        let mut out: Vec<Vec<String>> = Vec::new();
+        for (kind, e) in [("web", &s.web), ("secureweb", &s.secure)] {
+            if e.enabled || !e.host.is_empty() {
+                out.push(vec![
+                    format!("-set{kind}proxy"),
+                    service.into(),
+                    e.host.clone(),
+                    e.port.to_string(),
+                ]);
+            }
+            out.push(vec![
+                format!("-set{kind}proxystate"),
+                service.into(),
+                if e.enabled { "on" } else { "off" }.into(),
+            ]);
+        }
+        let mut bypass = vec!["-setproxybypassdomains".to_string(), service.into()];
+        if s.bypass.is_empty() {
+            bypass.push("Empty".into());
+        } else {
+            bypass.extend(s.bypass.iter().cloned());
+        }
+        out.push(bypass);
+        out
+    }
+
+    /// Runs the commands in one go through macOS's own administrator password prompt.
+    fn run_with_admin_prompt(commands: &[Vec<String>]) -> Result<()> {
+        let script = commands
+            .iter()
+            .map(|c| {
+                format!(
+                    "/usr/sbin/networksetup {}",
+                    c.iter()
+                        .map(|a| shell_quote(a))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        let apple = format!(
+            "do shell script \"{}\" with administrator privileges",
+            script.replace('\\', "\\\\").replace('"', "\\\"")
+        );
+        let out = Command::new("/usr/bin/osascript")
+            .args(["-e", &apple])
+            .output()
+            .context("running osascript")?;
+        if out.status.success() {
+            return Ok(());
+        }
+        let msg = String::from_utf8_lossy(&out.stderr);
+        bail!("{}", msg.trim().lines().last().unwrap_or("cancelled"))
+    }
+}
+
+/// Wraps text in single quotes for `sh`.
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 /// A backend that keeps "system" settings in a JSON file. For tests and CI: lets the whole
@@ -423,6 +483,30 @@ mod tests {
         .unwrap();
         assert!(restored);
         assert_eq!(backend.read("x").unwrap(), original);
+    }
+
+    #[test]
+    fn builds_every_networksetup_call_and_quotes_for_the_shell() {
+        let s = ProxySettings {
+            web: Endpoint {
+                enabled: true,
+                host: "127.0.0.1".into(),
+                port: 8888,
+            },
+            secure: Endpoint::default(),
+            bypass: vec![],
+        };
+        let c = Networksetup::commands("Wi-Fi", &s);
+        assert_eq!(
+            c[0],
+            ["-setwebproxy", "Wi-Fi", "127.0.0.1", "8888"].map(String::from)
+        );
+        assert_eq!(
+            c.last().unwrap(),
+            &["-setproxybypassdomains", "Wi-Fi", "Empty"].map(String::from)
+        );
+        assert_eq!(shell_quote("Wi-Fi"), "'Wi-Fi'");
+        assert_eq!(shell_quote("it's"), "'it'\\''s'");
     }
 
     #[test]

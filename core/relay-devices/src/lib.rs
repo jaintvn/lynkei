@@ -272,6 +272,20 @@ impl DeviceManager {
             .map(|(_, _, c)| c.clone())
     }
 
+    /// The result of an earlier connect, so a screen opened later shows the same checklist.
+    pub fn result(&self, id: &str) -> Option<ConnectResult> {
+        let (_, at, checklist) = self.connected.lock().unwrap().get(id).cloned()?;
+        let device = self.list().into_iter().find(|d| d.id == id)?;
+        Some(ConnectResult {
+            device: Device {
+                connected: true,
+                ..device
+            },
+            checklist,
+            connected_at_ms: at,
+        })
+    }
+
     // -- iOS Simulator --
 
     fn connect_simulator(&self, d: &Device, port: u16) -> Checklist {

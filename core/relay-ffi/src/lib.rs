@@ -363,6 +363,19 @@ impl RelayEngine {
         })
     }
 
+    /// The checklist of a device that is already connected (`None` if it is not).
+    pub fn device_status(&self, id: String) -> Option<FfiConnectResult> {
+        let r = self.devices.result(&id)?;
+        let ready = r.checklist.ready();
+        Some(FfiConnectResult {
+            device: device(r.device),
+            proxy: step(r.checklist.proxy),
+            certificate: step(r.checklist.certificate),
+            ready,
+            connected_at_ms: r.connected_at_ms,
+        })
+    }
+
     pub fn disconnect_device(&self, id: String) -> Result<(), RelayError> {
         Ok(self.devices.disconnect(&id)?)
     }

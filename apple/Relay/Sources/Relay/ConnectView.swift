@@ -38,7 +38,7 @@ struct ConnectView: View {
         .background(Theme.panel)
         .foregroundStyle(Theme.fg)
         .onAppear {
-            let s = DeviceStore(engine: { [traffic] in traffic.engineForDevices })
+            let s = traffic.deviceStore()
             devices = s
             s.startWatching()
         }
@@ -120,7 +120,7 @@ struct DeviceCard: View {
                 ChecklistRow(title: "Certificate trusted", step: result?.certificate, busy: busy)
                 ChecklistRow(
                     title: "Traffic seen",
-                    step: connected ? FfiStep(state: trafficSeen ? "done" : "pending", detail: trafficSeen ? "Requests are flowing" : "Use the app on the device") : nil,
+                    step: connected ? FfiStep(state: trafficSeen ? "done" : "pending", detail: trafficSeen ? "Requests are flowing" : "Waiting for the first request. Open an app on the device and use it.") : nil,
                     busy: false
                 )
             }

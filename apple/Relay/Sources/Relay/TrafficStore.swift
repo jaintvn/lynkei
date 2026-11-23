@@ -19,6 +19,15 @@ final class TrafficStore {
     /// For the Connect-a-device screen (device actions run on the same engine).
     var engineForDevices: RelayEngine? { engine }
 
+    /// One store for the whole app, so closing and reopening the screen keeps its state.
+    @ObservationIgnored private var deviceStoreCache: DeviceStore?
+    func deviceStore() -> DeviceStore {
+        if let deviceStoreCache { return deviceStoreCache }
+        let s = DeviceStore(engine: { [weak self] in self?.engine })
+        deviceStoreCache = s
+        return s
+    }
+
     var isRunning: Bool { port != nil }
 
     var filtered: [FfiTransaction] {

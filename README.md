@@ -29,6 +29,7 @@ core/                 Rust workspace (no platform code)
 apple/RelayKit/       Swift package wrapping the generated bindings + XCFramework
 apple/Relay/          SwiftUI Mac app
 android/relay-android Kotlin app: VpnService capture, foreground service
+android/demo-shop     "Acme Shop" demo app that makes realistic API calls, to try Relay with
 shared/rules-schema/  JSON Schema + example for the rules YAML
 scripts/              build-apple.sh, make-mac-app.sh, build-android.sh, test-android.sh
 ```
@@ -94,6 +95,14 @@ scripts/build-apple.sh && scripts/make-mac-app.sh && open apple/Relay/build/Rela
 ```
 
 Click **Connect device**. Relay finds booted iOS Simulators and Android emulators or USB phones and sets each one up (proxy and certificate) with one click. For an iPhone on Wi-Fi, scan the QR code on that screen. From a terminal, `relay devices connect <id>` does the same.
+
+## Try it with the demo app
+
+```bash
+cd android/demo-shop && ./gradlew assembleDebug && adb install -r app/build/outputs/apk/debug/app-debug.apk
+```
+
+Connect your emulator in Relay, then open **Acme Shop** and tap **Run every call**. Its 8 calls (list, JSON POST, a failing 500 checkout, a 401, a slow call, an image) appear in Relay with headers and bodies.
 
 ## Android app (on-device capture)
 

@@ -42,6 +42,12 @@ final class DeviceStore {
         let (list, url) = await Task.detached(priority: .utility) { (engine.listDevices(), engine.wifiSetupUrl()) }.value
         devices = list
         wifiURL = url
+        // A screen opened later (or after a restart of the sheet) still shows the checklist.
+        for d in list where d.connected && results[d.id] == nil {
+            let id = d.id
+            let known = await Task.detached { engine.deviceStatus(id: id) }.value
+            if let known { results[id] = known }
+        }
         scanning = false
     }
 

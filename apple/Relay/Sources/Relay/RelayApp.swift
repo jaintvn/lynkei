@@ -13,6 +13,7 @@ struct RelayApp: App {
                 .frame(minWidth: 1100, minHeight: 680)
                 .preferredColorScheme(.dark)
                 .onAppear { store.start() }
+                .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in store.shutdown() }
         }
         .windowStyle(.hiddenTitleBar)
     }

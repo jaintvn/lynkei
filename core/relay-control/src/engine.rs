@@ -27,6 +27,10 @@ pub struct EngineOptions {
     pub store: StoreConfig,
     /// How the macOS system proxy is changed (real `networksetup`, or a fake in tests).
     pub system_proxy: Option<Arc<dyn SystemProxyBackend>>,
+    /// Runs simctl/adb/openssl (a fake in tests). Default: real commands.
+    pub devices_runner: Option<Arc<dyn relay_devices::Runner>>,
+    /// Path to `adb`; found automatically when `None`.
+    pub adb: Option<String>,
 }
 
 impl EngineOptions {
@@ -36,6 +40,8 @@ impl EngineOptions {
             extra_upstream_roots: vec![],
             store: StoreConfig::default(),
             system_proxy: None,
+            devices_runner: None,
+            adb: None,
         }
     }
 }
@@ -47,7 +53,9 @@ pub struct Engine {
     events: broadcast::Sender<Transaction>,
     proxy: Mutex<Option<ProxyHandle>>,
     rules: std::sync::Mutex<RuleSet>,
-    system_proxy: Option<SystemProxy>,
+    system_proxy: Option<Arc<SystemProxy>>,
+    devices: Arc<relay_devices::DeviceManager>,
+    devices_runner: Arc<dyn relay_devices::Runner>,
 }
 
 struct Broadcast(broadcast::Sender<Transaction>);
@@ -76,9 +84,26 @@ impl Engine {
         );
         let rules = load_rules(&opts.data_dir.join(RULES_FILE))?;
         let system_proxy = match &opts.system_proxy {
-            Some(backend) => Some(SystemProxy::new(backend.clone(), &opts.data_dir)?),
+            Some(backend) => Some(Arc::new(SystemProxy::new(backend.clone(), &opts.data_dir)?)),
             None => None,
         };
+        let devices_runner: Arc<dyn relay_devices::Runner> = opts
+            .devices_runner
+            .clone()
+            .unwrap_or_else(|| Arc::new(relay_devices::SystemRunner));
+        let adb = opts
+            .adb
+            .clone()
+            .or_else(|| relay_devices::find_adb().map(|p| p.to_string_lossy().into_owned()));
+        let switch: Option<Arc<dyn relay_devices::SystemProxySwitch>> = system_proxy
+            .clone()
+            .map(|s| s as Arc<dyn relay_devices::SystemProxySwitch>);
+        let devices = Arc::new(relay_devices::DeviceManager::new(
+            devices_runner.clone(),
+            adb,
+            switch,
+            &opts.data_dir.join(relay_proxy::ca::CA_CERT_FILE),
+        ));
         Ok(Arc::new(Engine {
             opts,
             store,
@@ -87,6 +112,8 @@ impl Engine {
             proxy: Mutex::new(None),
             rules: std::sync::Mutex::new(rules),
             system_proxy,
+            devices,
+            devices_runner,
         }))
     }
 
@@ -135,11 +162,13 @@ impl Engine {
     }
 
     pub fn system_proxy(&self) -> Option<&SystemProxy> {
-        self.system_proxy.as_ref()
+        self.system_proxy.as_deref()
     }
 
     /// Restores system settings Relay changed. Call on shutdown.
     pub async fn shutdown(&self) {
+        let devices = self.devices.clone();
+        let _ = tokio::task::spawn_blocking(move || devices.disconnect_all()).await;
         if let Some(sp) = &self.system_proxy {
             let _ = sp.disable();
         }
@@ -238,6 +267,49 @@ impl Engine {
                 *self.rules.lock().unwrap() = set;
                 Ok(json!({ "saved": true, "problems": [] }))
             }
+            "devices.list" => {
+                let devices = self.devices.clone();
+                let list = tokio::task::spawn_blocking(move || devices.list())
+                    .await
+                    .map_err(|e| engine_err(e.into()))?;
+                let port = self.proxy_port().await.unwrap_or(8888);
+                let wifi = relay_devices::wifi_setup_url(self.devices_runner.as_ref(), port);
+                Ok(
+                    json!({ "devices": list, "wifi_setup_url": wifi, "proxy_port": self.proxy_port().await }),
+                )
+            }
+            "devices.connect" => {
+                let id = params
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| bad("`id` is required"))?
+                    .to_string();
+                let port = self
+                    .proxy_port()
+                    .await
+                    .ok_or_else(|| RpcError::new(RpcError::ENGINE, "start the proxy first"))?;
+                let devices = self.devices.clone();
+                let r = tokio::task::spawn_blocking(move || devices.connect(&id, port))
+                    .await
+                    .map_err(|e| engine_err(e.into()))?
+                    .map_err(engine_err)?;
+                Ok(
+                    json!({ "device": r.device, "checklist": r.checklist, "ready": r.checklist.ready(), "connected_at_ms": r.connected_at_ms }),
+                )
+            }
+            "devices.disconnect" => {
+                let id = params
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| bad("`id` is required"))?
+                    .to_string();
+                let devices = self.devices.clone();
+                tokio::task::spawn_blocking(move || devices.disconnect(&id))
+                    .await
+                    .map_err(|e| engine_err(e.into()))?
+                    .map_err(engine_err)?;
+                Ok(json!({}))
+            }
             "ca.info" => {
                 let path = self.opts.data_dir.join(relay_proxy::ca::CA_CERT_FILE);
                 let provider = Arc::new(rustls::crypto::ring::default_provider());
@@ -272,7 +344,7 @@ impl Engine {
     }
 
     fn system_proxy_required(&self) -> Result<&SystemProxy, RpcError> {
-        self.system_proxy.as_ref().ok_or_else(|| {
+        self.system_proxy.as_deref().ok_or_else(|| {
             RpcError::new(
                 RpcError::ENGINE,
                 "system proxy control is not available on this platform",

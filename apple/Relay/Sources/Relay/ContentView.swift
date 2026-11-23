@@ -5,6 +5,7 @@ struct ContentView: View {
     @Environment(TrafficStore.self) private var store
     @State private var simulators: [BootedSimulator] = []
     @State private var simMessage: String?
+    @State private var showConnect = false
 
     var body: some View {
         @Bindable var store = store
@@ -24,6 +25,7 @@ struct ContentView: View {
         .background(Theme.bg)
         .foregroundStyle(Theme.fg)
         .onAppear { simulators = Simulators.booted() }
+        .sheet(isPresented: $showConnect) { ConnectView() }
     }
 
     // MARK: Toolbar
@@ -72,6 +74,11 @@ struct ContentView: View {
             }
             .menuStyle(.borderlessButton)
             .fixedSize()
+
+            Button(action: { showConnect = true }) {
+                Label("Connect device", systemImage: "plus.circle.fill")
+            }
+            .buttonStyle(PillButtonStyle())
 
             Button("Clear") { store.clear() }.buttonStyle(PillButtonStyle())
         }

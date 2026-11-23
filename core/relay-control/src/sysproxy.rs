@@ -306,6 +306,15 @@ impl SystemProxyBackend for FileBackend {
     }
 }
 
+impl relay_devices::SystemProxySwitch for SystemProxy {
+    fn enable(&self, host: &str, port: u16) -> Result<()> {
+        SystemProxy::enable(self, host, port)
+    }
+    fn disable(&self) -> Result<()> {
+        SystemProxy::disable(self)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

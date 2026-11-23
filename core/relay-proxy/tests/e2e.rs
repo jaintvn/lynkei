@@ -1022,3 +1022,43 @@ async fn websocket_through_the_vpn_path_is_relayed_and_recorded() {
     assert_eq!(t.scheme, "http");
     assert_ws_recorded(&t);
 }
+
+/// A phone opens http://<mac>:<port>/setup straight at the proxy (origin-form, no CONNECT).
+#[tokio::test]
+async fn phones_can_open_the_setup_pages_on_the_proxy_port() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let (_p, origin_ca) = start_https_origin().await;
+    let (proxy, _log, _ca) = start_proxy(origin_ca, &[]).await;
+    let get = |path: &'static str| async move {
+        let mut c = tokio::net::TcpStream::connect(proxy.local_addr)
+            .await
+            .unwrap();
+        c.write_all(
+            format!(
+                "GET {path} HTTP/1.1\r\nHost: jains-mbp.local:8888\r\nConnection: close\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+        let mut out = Vec::new();
+        c.read_to_end(&mut out).await.unwrap();
+        String::from_utf8_lossy(&out).into_owned()
+    };
+    let setup = get("/setup").await;
+    assert!(
+        setup.starts_with("HTTP/1.1 200")
+            && setup.contains("http://jains-mbp.local:8888/proxy.pac")
+    );
+    let cfg = get("/relay.mobileconfig").await;
+    assert!(
+        cfg.contains("application/x-apple-aspen-config") && cfg.contains("com.apple.security.root")
+    );
+    assert!(
+        get("/proxy.pac")
+            .await
+            .contains("PROXY jains-mbp.local:8888; DIRECT")
+    );
+    assert!(get("/ca.pem").await.contains("BEGIN CERTIFICATE"));
+    assert!(get("/nope").await.starts_with("HTTP/1.1 404"));
+}

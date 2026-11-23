@@ -1069,6 +1069,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "libc",
+ "relay-devices",
  "relay-model",
  "relay-proxy",
  "relay-store",
@@ -1080,10 +1081,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "relay-devices"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "relay-ffi"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "relay-control",
+ "relay-devices",
  "relay-model",
  "relay-netstack",
  "relay-proxy",
@@ -1122,6 +1135,7 @@ name = "relay-proxy"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "bytes",
  "flate2",
  "futures-core",

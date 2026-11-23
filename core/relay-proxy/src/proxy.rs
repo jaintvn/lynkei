@@ -263,8 +263,30 @@ async fn handle_proxy_request(
         .map(str::to_owned)
         .or_else(|| host_header(req.headers()));
     if req.uri().authority().is_none() || host.as_deref() == Some(CA_DOWNLOAD_HOST) {
-        // Origin-form request aimed at the proxy itself, or the magic CA host.
-        return ca_download_response(&shared);
+        // Origin-form request aimed at the proxy itself (a phone opening the setup page), or the
+        // magic CA host (`http://relay.ca` → the certificate).
+        let path = req.uri().path();
+        if host.as_deref() == Some(CA_DOWNLOAD_HOST) && path == "/" {
+            return ca_download_response(&shared);
+        }
+        let host_h = host.clone().unwrap_or_default();
+        return match crate::setup::route(path, &host_h, shared.ca.ca_pem(), shared.ca.ca_der()) {
+            Some(page) => {
+                let mut r = Response::new(full(Bytes::from(page.body)));
+                r.headers_mut().insert(
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_static(page.content_type),
+                );
+                if let Some(name) = page.filename
+                    && let Ok(v) =
+                        HeaderValue::from_str(&format!("attachment; filename=\"{name}\""))
+                {
+                    r.headers_mut().insert(header::CONTENT_DISPOSITION, v);
+                }
+                r
+            }
+            None => text_response(StatusCode::NOT_FOUND, "Relay: nothing here. Open /setup\n"),
+        };
     }
     forward(&shared, req, "http", None, peer, false).await
 }

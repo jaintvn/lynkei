@@ -6,6 +6,7 @@ pub mod body;
 pub mod ca;
 pub mod client;
 mod proxy;
+pub mod setup;
 pub mod sniff;
 pub mod tee;
 pub mod ws;

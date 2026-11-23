@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 anyhow = "1.0.104"
 libc = "0.2.191"
+relay-devices = { version = "0.1.0", path = "../relay-devices" }
 relay-model = { version = "0.1.0", path = "../relay-model" }
 relay-proxy = { version = "0.1.0", path = "../relay-proxy" }
 relay-store = { version = "0.1.0", path = "../relay-store" }

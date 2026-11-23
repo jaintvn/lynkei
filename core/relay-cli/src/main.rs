@@ -7,6 +7,7 @@
 //!   relay rules check <file> | push <file> | pull
 //!   relay proxy start [--port 8888] | stop
 //!   relay system-proxy on | off | status
+//!   relay devices [list] | connect <id> | disconnect <id>
 //!
 //! Standalone:
 //!   relay serve [--port 8888] [--listen 0.0.0.0] [--data-dir DIR] [--json]
@@ -95,7 +96,7 @@ async fn main() -> Result<()> {
         "serve" => serve(&args, data_dir).await,
         "fetch" => fetch(&args, data_dir).await,
         "get" => get(&args).await,
-        "status" | "search" | "tail" | "rules" | "proxy" | "system-proxy" => {
+        "status" | "search" | "tail" | "rules" | "proxy" | "system-proxy" | "devices" => {
             control(&args, &data_dir).await
         }
         "ca" => {
@@ -106,7 +107,7 @@ async fn main() -> Result<()> {
         }
         _ => {
             eprintln!(
-                "usage (with relayd running):\n  relay status\n  relay search [filter…] [--limit 50] [--json]   e.g. relay search status:5xx host:api.acme.com\n  relay tail [filter…]\n  relay rules check <file> | push <file> | pull\n  relay proxy start [--port 8888] | stop\n  relay system-proxy on | off | status\n\nstandalone:\n  relay serve [--port 8888] [--listen 127.0.0.1] [--json]\n  relay get <url> [--ca FILE]\n  relay fetch <url> [--proxy 127.0.0.1:8888]\n  relay ca\n\ncommon: --data-dir DIR, --socket PATH"
+                "usage (with relayd running):\n  relay status\n  relay search [filter…] [--limit 50] [--json]   e.g. relay search status:5xx host:api.acme.com\n  relay tail [filter…]\n  relay rules check <file> | push <file> | pull\n  relay proxy start [--port 8888] | stop\n  relay system-proxy on | off | status\n  relay devices [list] | connect <id> | disconnect <id>\n\nstandalone:\n  relay serve [--port 8888] [--listen 127.0.0.1] [--json]\n  relay get <url> [--ca FILE]\n  relay fetch <url> [--proxy 127.0.0.1:8888]\n  relay ca\n\ncommon: --data-dir DIR, --socket PATH"
             );
             Ok(())
         }
@@ -341,6 +342,74 @@ async fn control(args: &Args, data_dir: &std::path::Path) -> Result<()> {
         ("proxy", "stop") => {
             c.call("proxy.stop", Value::Null).await?;
             println!("proxy stopped");
+        }
+        ("devices", "") | ("devices", "list") => {
+            let r = c.call("devices.list", Value::Null).await?;
+            if args.flags.contains("json") {
+                println!("{}", pretty(&r));
+            } else {
+                let list = r["devices"].as_array().cloned().unwrap_or_default();
+                if list.is_empty() {
+                    println!(
+                        "no simulators or Android devices found (boot one, or plug in a phone with USB debugging)"
+                    );
+                }
+                for d in &list {
+                    println!(
+                        "{:<38} {:<18} {:<14} {}{}",
+                        d["id"].as_str().unwrap_or(""),
+                        d["name"].as_str().unwrap_or(""),
+                        d["os"].as_str().unwrap_or(""),
+                        d["kind"].as_str().unwrap_or(""),
+                        if d["connected"].as_bool() == Some(true) {
+                            "  ● connected"
+                        } else {
+                            ""
+                        }
+                    );
+                }
+                println!(
+                    "\niPhone/iPad over Wi-Fi: open {} on the phone (scan the QR in the app)",
+                    r["wifi_setup_url"].as_str().unwrap_or("")
+                );
+            }
+        }
+        ("devices", "connect") => {
+            let id = args
+                .positional
+                .get(1)
+                .context("usage: relay devices connect <id>")?;
+            let r = c.call("devices.connect", json!({"id": id})).await?;
+            let mark = |s: &Value| match s["state"].as_str() {
+                Some("done") => "✓",
+                Some("needs_action") => "!",
+                _ => "✗",
+            };
+            let d = &r["device"];
+            println!(
+                "{} ({})",
+                d["name"].as_str().unwrap_or(""),
+                d["os"].as_str().unwrap_or("")
+            );
+            for (label, key) in [("Proxy", "proxy"), ("Certificate", "certificate")] {
+                let s = &r["checklist"][key];
+                println!(
+                    "  {} {label}: {}",
+                    mark(s),
+                    s["detail"].as_str().unwrap_or("")
+                );
+            }
+            if r["ready"].as_bool() != Some(true) {
+                std::process::exit(2);
+            }
+        }
+        ("devices", "disconnect") => {
+            let id = args
+                .positional
+                .get(1)
+                .context("usage: relay devices disconnect <id>")?;
+            c.call("devices.disconnect", json!({"id": id})).await?;
+            println!("disconnected");
         }
         ("system-proxy", "on") => println!(
             "{}",

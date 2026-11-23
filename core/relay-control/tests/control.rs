@@ -215,3 +215,81 @@ async fn only_one_daemon_per_socket() {
         .to_string();
     assert!(err.contains("already running"), "{err}");
 }
+
+struct ScriptedRunner;
+
+impl relay_devices::Runner for ScriptedRunner {
+    fn run(&self, program: &str, args: &[&str]) -> anyhow::Result<relay_devices::Output> {
+        let line = format!("{program} {}", args.join(" "));
+        let out = |ok: bool, s: &str| relay_devices::Output {
+            ok,
+            stdout: s.into(),
+            stderr: String::new(),
+        };
+        Ok(if line.contains("simctl list") {
+            out(
+                true,
+                r#"{"devices":{"com.apple.CoreSimulator.SimRuntime.iOS-26-4":[{"udid":"6507CF9D-A8F8-4285-96CF-53780AE0EB92","name":"iPhone 17 Pro","state":"Booted"}]}}"#,
+            )
+        } else if line.contains("LocalHostName") {
+            out(true, "test-mac\n")
+        } else {
+            out(true, "")
+        })
+    }
+}
+
+#[tokio::test]
+async fn devices_are_listed_connected_and_disconnected_through_the_api() {
+    let dir = temp("devices");
+    let backend = Arc::new(FileBackend {
+        path: dir.join("fake-system.json"),
+    });
+    let mut opts = EngineOptions::new(&dir);
+    opts.system_proxy = Some(backend.clone());
+    opts.devices_runner = Some(Arc::new(ScriptedRunner));
+    let engine = Engine::new(opts).unwrap();
+    let port = engine
+        .start_proxy("127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
+    let socket = dir.join("c.sock");
+    tokio::spawn(relay_control::server::serve(
+        relay_control::server::bind(&socket).unwrap(),
+        engine.clone(),
+    ));
+    let mut c = Client::connect(&socket).await.unwrap();
+
+    let list = c.call("devices.list", Value::Null).await.unwrap();
+    assert_eq!(list["devices"][0]["name"], "iPhone 17 Pro");
+    assert_eq!(
+        list["wifi_setup_url"],
+        format!("http://test-mac.local:{port}/setup")
+    );
+
+    let id = "6507CF9D-A8F8-4285-96CF-53780AE0EB92";
+    let r = c.call("devices.connect", json!({"id": id})).await.unwrap();
+    assert_eq!(r["ready"], true, "{r}");
+    assert_eq!(r["checklist"]["certificate"]["state"], "done");
+    assert_eq!(
+        backend.read("x").unwrap().secure.port,
+        port,
+        "system proxy now points at Relay"
+    );
+    let again = c.call("devices.list", Value::Null).await.unwrap();
+    assert_eq!(again["devices"][0]["connected"], true);
+
+    c.call("devices.disconnect", json!({"id": id}))
+        .await
+        .unwrap();
+    assert!(
+        !backend.read("x").unwrap().secure.enabled,
+        "last simulator disconnected → proxy off"
+    );
+    let e = c
+        .call("devices.connect", json!({"id": "nope"}))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("not running or attached"), "{e}");
+}

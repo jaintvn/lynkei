@@ -127,6 +127,70 @@ pub struct FfiWsMessage {
     pub at_ms: u64,
 }
 
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiDevice {
+    pub id: String,
+    /// "ios_simulator", "android_emulator" or "android_usb".
+    pub kind: String,
+    pub name: String,
+    pub os: String,
+    pub connected: bool,
+}
+
+/// One line of the connect checklist.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiStep {
+    /// "pending", "done", "needs_action" or "failed".
+    pub state: String,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiConnectResult {
+    pub device: FfiDevice,
+    pub proxy: FfiStep,
+    pub certificate: FfiStep,
+    pub ready: bool,
+    pub connected_at_ms: u64,
+}
+
+fn step(s: relay_devices::StepState) -> FfiStep {
+    use relay_devices::StepState::*;
+    match s {
+        Pending => FfiStep {
+            state: "pending".into(),
+            detail: String::new(),
+        },
+        Done(d) => FfiStep {
+            state: "done".into(),
+            detail: d,
+        },
+        NeedsAction(d) => FfiStep {
+            state: "needs_action".into(),
+            detail: d,
+        },
+        Failed(d) => FfiStep {
+            state: "failed".into(),
+            detail: d,
+        },
+    }
+}
+
+fn device(d: relay_devices::Device) -> FfiDevice {
+    let kind = match d.kind {
+        relay_devices::Kind::IosSimulator => "ios_simulator",
+        relay_devices::Kind::AndroidEmulator => "android_emulator",
+        relay_devices::Kind::AndroidUsb => "android_usb",
+    };
+    FfiDevice {
+        id: d.id,
+        kind: kind.into(),
+        name: d.name,
+        os: d.os,
+        connected: d.connected,
+    }
+}
+
 /// Implemented by the app (Swift/Kotlin). Called on engine threads: hop to the UI thread yourself.
 #[uniffi::export(callback_interface)]
 pub trait TrafficListener: Send + Sync {
@@ -155,6 +219,7 @@ pub struct RelayEngine {
     handle: Mutex<Option<ProxyHandle>>,
     vpn: Mutex<Option<relay_netstack::VpnCapture>>,
     store: Mutex<Option<Arc<relay_store::Store>>>,
+    devices: Arc<relay_devices::DeviceManager>,
 }
 
 #[uniffi::export]
@@ -170,9 +235,28 @@ impl RelayEngine {
             .map_err(|e| RelayError::Failed {
                 reason: e.to_string(),
             })?;
+        // On macOS, simulators use the Mac's system proxy; creating the manager also puts back any
+        // setting a crashed earlier run left behind.
+        let data_dir: PathBuf = data_dir.into();
+        let switch: Option<Arc<dyn relay_devices::SystemProxySwitch>> = if cfg!(target_os = "macos")
+        {
+            relay_control::sysproxy::SystemProxy::new(
+                Arc::new(relay_control::sysproxy::Networksetup),
+                &data_dir,
+            )
+            .ok()
+            .map(|s| Arc::new(s) as Arc<dyn relay_devices::SystemProxySwitch>)
+        } else {
+            None
+        };
+        let devices = Arc::new(relay_devices::DeviceManager::system(
+            switch,
+            &data_dir.join(relay_proxy::ca::CA_CERT_FILE),
+        ));
         Ok(Arc::new(Self {
+            devices,
             runtime,
-            data_dir: data_dir.into(),
+            data_dir,
             handle: Mutex::new(None),
             vpn: Mutex::new(None),
             store: Mutex::new(None),
@@ -250,6 +334,54 @@ impl RelayEngine {
             .as_ref()
             .and_then(|s| s.count().ok())
             .unwrap_or(0)
+    }
+
+    /// Booted iOS simulators and attached Android devices (runs simctl/adb; takes a moment).
+    pub fn list_devices(&self) -> Vec<FfiDevice> {
+        self.devices.list().into_iter().map(device).collect()
+    }
+
+    /// Connects a device to the running proxy and returns the checklist.
+    pub fn connect_device(&self, id: String) -> Result<FfiConnectResult, RelayError> {
+        let port = self
+            .handle
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|h| h.local_addr.port())
+            .ok_or_else(|| RelayError::Failed {
+                reason: "start the engine first".into(),
+            })?;
+        let r = self.devices.connect(&id, port)?;
+        let ready = r.checklist.ready();
+        Ok(FfiConnectResult {
+            device: device(r.device),
+            proxy: step(r.checklist.proxy),
+            certificate: step(r.checklist.certificate),
+            ready,
+            connected_at_ms: r.connected_at_ms,
+        })
+    }
+
+    pub fn disconnect_device(&self, id: String) -> Result<(), RelayError> {
+        Ok(self.devices.disconnect(&id)?)
+    }
+
+    /// Undoes every device connection (call when the app quits).
+    pub fn disconnect_all_devices(&self) {
+        self.devices.disconnect_all();
+    }
+
+    /// `http://<mac>.local:<port>/setup` — what the iPhone QR code encodes.
+    pub fn wifi_setup_url(&self) -> String {
+        let port = self
+            .handle
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|h| h.local_addr.port())
+            .unwrap_or(8888);
+        relay_devices::wifi_setup_url(&relay_devices::SystemRunner, port)
     }
 
     pub fn vpn_stats(&self) -> Option<VpnStats> {

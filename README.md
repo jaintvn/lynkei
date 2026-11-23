@@ -20,6 +20,7 @@ core/                 Rust workspace (no platform code)
   relay-netstack/     VPN packets → TCP/UDP streams (Android); uses vendor/ipstack (patched)
   relay-store/        SQLite + FTS5 traffic history
   relay-control/      Control API (JSON-RPC over a Unix socket), engine, system proxy + guard
+  relay-devices/      Find and connect iOS Simulators, Android emulators and USB phones
   relayd/             The engine daemon
   relay-ffi/          UniFFI boundary → Swift and Kotlin
   relay-cli/          `relay` command-line tool
@@ -92,8 +93,7 @@ Bare words match the URL, headers and bodies. Put `-` in front of a term to nega
 scripts/build-apple.sh && scripts/make-mac-app.sh && open apple/Relay/build/Relay.app
 ```
 
-- **iOS Simulator:** choose **Simulators → Trust Relay CA**, then run `relay system-proxy on`.
-- **Android emulator or USB device:** run `adb reverse tcp:8888 tcp:8888`, then `adb shell settings put global http_proxy 127.0.0.1:8888`.
+Click **Connect device**. Relay finds booted iOS Simulators and Android emulators or USB phones and sets each one up (proxy and certificate) with one click. For an iPhone on Wi-Fi, scan the QR code on that screen. From a terminal, `relay devices connect <id>` does the same.
 
 ## Android app (on-device capture)
 

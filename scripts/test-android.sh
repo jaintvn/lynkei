@@ -7,7 +7,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 export PATH="/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin:$PATH"
 export ANDROID_NDK_HOME="${ANDROID_NDK_HOME:-$(ls -d "$HOME/Library/Android/sdk/ndk/"* | sort -V | tail -1)}"
 ADB="${ADB:-$HOME/Library/Android/sdk/platform-tools/adb}"
-CRATES=(relay-model relay-proxy relay-store relay-netstack relay-control)
+CRATES=(relay-model relay-proxy relay-store relay-netstack relay-control relay-devices)
 # Tests that read files from the source tree (not present on the device).
 SKIP=(--skip checked_in_json_schema --skip shipped_example)
 
@@ -17,7 +17,7 @@ cargo ndk -t arm64-v8a --platform 26 test --no-run "${args[@]}"
 
 # Newest test executable per test target (cargo's build-dir layout: build/<crate>/<hash>/out/).
 bins=()
-for t in relay_model relay_proxy e2e relay_store relay_netstack close relay_control control; do
+for t in relay_model relay_proxy e2e relay_store relay_netstack close relay_control control relay_devices; do
   f=$(find target/aarch64-linux-android/debug/build -path "*/out/${t}-*" -type f -perm -u+x 2>/dev/null \
       | grep -vE '\.(d|rlib|rmeta|so|o)$' | xargs ls -t 2>/dev/null | head -1 || true)
   [ -n "$f" ] && bins+=("$f")

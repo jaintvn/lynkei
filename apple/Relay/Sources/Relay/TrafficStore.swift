@@ -16,6 +16,9 @@ final class TrafficStore {
 
     private var engine: RelayEngine?
 
+    /// For the Connect-a-device screen (device actions run on the same engine).
+    var engineForDevices: RelayEngine? { engine }
+
     var isRunning: Bool { port != nil }
 
     var filtered: [FfiTransaction] {
@@ -51,6 +54,12 @@ final class TrafficStore {
             errorMessage = "\(error)"
             status = "Failed to start"
         }
+    }
+
+    /// Called when the app quits: undo every device connection and the system proxy.
+    func shutdown() {
+        engine?.disconnectAllDevices()
+        engine?.stop()
     }
 
     func stop() {

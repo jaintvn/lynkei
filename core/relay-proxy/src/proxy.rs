@@ -796,6 +796,8 @@ async fn raw_tunnel<S>(
             let _ = upstream.set_nodelay(true);
             let mut open = t.clone();
             open.state = TransactionState::InProgress;
+            // Say why right away: a long-lived connection stays "open" for a long time.
+            open.error = why_not_decrypted.map(Into::into);
             open.duration_ms = started.elapsed().as_millis() as u64;
             shared.sink.on_transaction(open);
             // Count on the app's side as bytes flow: copy_bidirectional drops its totals when either

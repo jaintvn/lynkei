@@ -55,12 +55,14 @@ struct BodyView: View {
                     .frame(height: 280)
                     .background(RoundedRectangle(cornerRadius: 10).fill(Theme.raised))
                 HStack(spacing: 8) {
-                    Button { showSheet = true } label: { Label("Search & edit…", systemImage: "magnifyingglass") }
+                    if !GRPC.isGRPC(tx) {
+                        Button { showSheet = true } label: { Label("Search & edit…", systemImage: "magnifyingglass") }
+                    }
                     Button("Copy") {
                         NSPasteboard.general.clearContents()
                         NSPasteboard.general.setString(shown, forType: .string)
                     }
-                    Text("\(formatBytes(captured.size))\(captured.isJSON ? " · JSON" : "")")
+                    Text("\(formatBytes(captured.size))\(GRPC.isGRPC(tx) ? " · decoded gRPC, read-only" : (captured.isJSON ? " · JSON" : ""))")
                         .font(.system(size: 11.5)).foregroundStyle(Theme.faint)
                     if captured.truncated {
                         Label("only the first part was captured", systemImage: "exclamationmark.triangle")

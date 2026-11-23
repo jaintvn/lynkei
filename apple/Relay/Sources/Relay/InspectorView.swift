@@ -6,21 +6,31 @@ struct InspectorView: View {
     let tx: FfiTransaction?
     @Environment(TrafficStore.self) private var store
     @Environment(Sheets.self) private var sheets
-    @State private var tab = "Overview"
+    @State private var tab = ProcessInfo.processInfo.environment["RELAY_TAB"] ?? "Overview"
 
-    private let tabs = ["Overview", "Request", "Response", "Timing"]
+    /// Overview / Request / Response / Timing, plus a tab for what the call turned out to be.
+    private func tabs(for tx: FfiTransaction) -> [String] {
+        var t = ["Overview", "Request", "Response", "Timing"]
+        if GraphQL.isGraphQL(tx) { t.append("GraphQL") }
+        if EventDecoder.vendor(tx) != nil { t.append("Events") }
+        if LogStore.shared.hasLogs { t.append("Logs") }
+        return t
+    }
 
     var body: some View {
         if let tx {
             VStack(spacing: 0) {
                 header(tx)
-                tabBar
+                tabBar(tabs(for: tx))
                 ScrollView {
                     VStack(alignment: .leading, spacing: 18) {
-                        switch tab {
+                        switch tabs(for: tx).contains(tab) ? tab : "Overview" {
                         case "Request": messageTab(tx, isRequest: true)
                         case "Response": messageTab(tx, isRequest: false)
                         case "Timing": timing(tx)
+                        case "GraphQL": GraphQLTab(tx: tx)
+                        case "Events": EventsTab(tx: tx)
+                        case "Logs": LogsTab(tx: tx)
                         default: overview(tx)
                         }
                     }
@@ -77,15 +87,17 @@ struct InspectorView: View {
         Button(title, action: action).buttonStyle(PillButtonStyle()).font(.system(size: 12, weight: .medium))
     }
 
-    private var tabBar: some View {
-        HStack(spacing: 18) {
+    private func tabBar(_ tabs: [String]) -> some View {
+        let current = tabs.contains(tab) ? tab : "Overview"
+        return HStack(spacing: 14) {
             ForEach(tabs, id: \.self) { t in
                 Button { tab = t } label: {
                     Text(t)
                         .font(.system(size: 12.5, weight: .medium))
-                        .foregroundStyle(tab == t ? Theme.fg : Theme.muted)
+                        .lineLimit(1).fixedSize()
+                        .foregroundStyle(current == t ? Theme.fg : Theme.muted)
                         .frame(height: 38)
-                        .overlay(alignment: .bottom) { if tab == t { Rectangle().fill(Theme.accent).frame(height: 2) } }
+                        .overlay(alignment: .bottom) { if current == t { Rectangle().fill(Theme.accent).frame(height: 2) } }
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -101,6 +113,7 @@ struct InspectorView: View {
     @ViewBuilder
     private func overview(_ tx: FfiTransaction) -> some View {
         facts(tx)
+        GRPCSummary(tx: tx)
         timing(tx)
         section("Response body") { BodyView(tx: tx, isRequest: false) }
         if Analytics.isError(tx) { failing(tx) }

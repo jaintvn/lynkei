@@ -257,6 +257,7 @@ final class TrafficStore {
             refreshRules()
             refreshSwitches()
             watchBreakpoints()
+            LogStore.shared.start()
             errorMessage = nil
         } catch {
             errorMessage = "\(error)"
@@ -266,6 +267,7 @@ final class TrafficStore {
 
     /// Called when the app quits: undo every device connection and the system proxy.
     func shutdown() {
+        LogStore.shared.stop()
         engine?.disconnectAllDevices()
         engine?.stop()
     }
@@ -298,6 +300,7 @@ final class TrafficStore {
 
     /// Resends a captured request exactly as it was, once.
     func repeatNow(_ tx: FfiTransaction) {
+        if GRPC.isGRPC(tx) { ruleMessage = "gRPC calls can't be repeated yet: Relay shows the messages decoded, not as the original bytes"; return }
         let draft = ComposeDraft(copying: tx)
         Task {
             do {
@@ -317,6 +320,8 @@ final class TrafficStore {
     /// Position of each transaction id in `transactions`, so a later event (same id) replaces the row.
     private var indexById: [UInt64: Int] = [:]
 
+    func appendImported(_ tx: FfiTransaction) { append(tx) }
+
     private func append(_ tx: FfiTransaction) {
         revision &+= 1
         if let i = indexById[tx.id], i < transactions.count, transactions[i].id == tx.id {
@@ -325,6 +330,8 @@ final class TrafficStore {
         }
         indexById[tx.id] = transactions.count
         transactions.append(tx)
+        // Test hook: RELAY_SELECT=<text in a URL> selects the first matching call.
+        if selection == nil, let want = ProcessInfo.processInfo.environment["RELAY_SELECT"], tx.url.contains(want) { selection = tx.id }
         if transactions.count > 50_000 {
             transactions.removeFirst(transactions.count - 50_000)
             indexById = Dictionary(uniqueKeysWithValues: transactions.enumerated().map { ($1.id, $0) })

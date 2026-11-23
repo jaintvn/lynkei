@@ -60,6 +60,7 @@ struct RulesScreen: View {
             VStack(alignment: .leading, spacing: 14) {
                 Button { newRule() } label: { Text("+ New rule").frame(maxWidth: .infinity) }
                     .buttonStyle(AccentButtonStyle(height: 32))
+                ScenariosSection()
                 ForEach(RuleStyle.order, id: \.self) { kind in
                     let items = store.rules.filter { $0.kind == kind }
                     if !items.isEmpty {

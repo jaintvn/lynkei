@@ -37,7 +37,12 @@ enum Analytics {
 
     /// Identifies an endpoint for favourites: `GET api.acme.com/v2/products/{id}` (a tunnel: `CONNECT host:443`).
     static func endpointKey(_ t: FfiTransaction) -> String {
-        t.state == .tunneled ? "\(t.method) \(t.host):\(t.port)" : "\(t.method) \(t.host)\(foldPath(t.path))"
+        t.state == .tunneled ? "\(t.method) \(t.host):\(t.port)" : "\(t.method) \(t.host)\(foldPath(t.path))\(operationSuffix(t))"
+    }
+
+    /// ` · GetProducts` for a GraphQL call, so each operation is its own endpoint (they all share one URL).
+    static func operationSuffix(_ t: FfiTransaction) -> String {
+        GraphQL.label(t).map { " · \($0)" } ?? ""
     }
 
     enum Platform { case ios, android, mac }
@@ -63,7 +68,9 @@ enum Analytics {
         if t.state == .tunneled { return "TLS" }
         if !t.websocketMessages.isEmpty { return "WS" }
         let ct = t.responseHeaders.first { $0.name.lowercased() == "content-type" }?.value.lowercased() ?? ""
-        if t.path.lowercased().contains("graphql") { return "GQL" }
+        if GRPC.isGRPC(t) { return "gRPC" }
+        if GraphQL.isGraphQL(t) { return "GQL" }
+        if EventDecoder.vendor(t) != nil { return "EVT" }
         if ct.contains("json") { return "JSON" }
         if ct.contains("image") { return "IMG" }
         if ct.contains("html") { return "HTML" }
@@ -141,7 +148,7 @@ extension Analytics {
         var map: [String: EndpointStat] = [:]
         for t in txs {
             let tunnel = t.state == .tunneled
-            let path = tunnel ? "\(t.host):\(t.port)" : foldPath(t.path)
+            let path = tunnel ? "\(t.host):\(t.port)" : foldPath(t.path) + operationSuffix(t)
             let key = "\(t.method) \(path) \(t.host)"
             var s = map[key] ?? EndpointStat(method: t.method, path: path, host: tunnel ? "TLS passthrough" : t.host)
             s.tunnel = tunnel

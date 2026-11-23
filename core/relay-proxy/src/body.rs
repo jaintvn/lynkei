@@ -48,6 +48,36 @@ pub fn body_preview(headers: &HeaderMap, body: &[u8], max_bytes: usize) -> Optio
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
+    let lower_type = content_type.to_ascii_lowercase();
+    if lower_type.contains("grpc") || lower_type.contains("protobuf") {
+        // Binary, but readable once decoded: shown as JSON keyed by field number.
+        let raw = decode_body(headers, body, max_bytes)?;
+        if lower_type.contains("grpc-web-text") {
+            return None;
+        }
+        let text = if lower_type.contains("grpc") {
+            let grpc_enc = headers
+                .get("grpc-encoding")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            crate::protobuf::decode_grpc(&raw, |f| {
+                if grpc_enc.contains("gzip") {
+                    inflate(flate2::read::GzDecoder::new(f), max_bytes)
+                } else {
+                    None
+                }
+            })?
+        } else {
+            crate::protobuf::decode_message(&raw)?
+        };
+        let mut text = text;
+        if text.len() > max_bytes {
+            text.truncate(text.floor_char_boundary(max_bytes));
+            text.push_str("\n…[truncated]");
+        }
+        return Some(text);
+    }
     if !content_type.is_empty() && !is_textual(content_type) {
         return None;
     }

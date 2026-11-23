@@ -22,6 +22,7 @@ struct RelayApp: App {
                     store.start()
                     island.start()
                 }
+                .onOpenURL { url in SessionIO.open(url, store: store) }
                 .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in store.shutdown() }
         }
         .windowStyle(.hiddenTitleBar)

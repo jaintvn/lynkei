@@ -74,6 +74,8 @@ struct TrafficScreen: View {
             .overlay(RoundedRectangle(cornerRadius: 9).stroke(store.searchError == nil ? Theme.line2 : Theme.s5xx))
             .help(store.searchError ?? "Filter language: app: client: host: path: method: status: header:name=value body: duration: size:")
 
+            if scenarios.recordingSince != nil { RecordingBar().fixedSize() }
+
             toolsGroup
 
             FocusToggle()
@@ -174,9 +176,19 @@ struct TrafficScreen: View {
         .contentShape(Rectangle())
     }
 
+    private let scenarios = ScenarioStore.shared
+
     private var moreMenu: some View {
         Menu {
             Button("Compose request…") { sheets.composing = ComposeDraft() }
+            Button(scenarios.recordingSince == nil ? "Record scenario" : "Stop recording scenario") {
+                if scenarios.recordingSince == nil { scenarios.startRecording() } else { scenarios.cancelRecording() }
+            }
+            Divider()
+            Button("Share session…") { SessionIO.share(store: store) }
+            Button("Open session…") { SessionIO.open(store: store) }
+            Divider()
+            Toggle("Capture device logs", isOn: Binding(get: { LogStore.shared.enabled }, set: { LogStore.shared.enabled = $0 }))
             Divider()
             Button("Export HAR…") { exportHAR() }
             Button("Import HAR…") { importHAR() }
@@ -488,7 +500,7 @@ struct TrafficRow: View {
                         .padding(.horizontal, 5).padding(.vertical, 1)
                         .overlay(RoundedRectangle(cornerRadius: 4).stroke(Theme.line2))
                 }
-                Text(tx.state == .tunneled ? "\(tx.host):\(tx.port)" : tx.path)
+                Text(rowTitle)
                     .font(.system(size: 12, design: .monospaced))
                     .lineLimit(1).truncationMode(.middle)
             }
@@ -525,6 +537,14 @@ struct TrafficRow: View {
     }
 
     private var isError: Bool { tx.state == .failed || (tx.status ?? 0) >= 500 }
+
+    /// The path, plus what the call is when the path cannot say: the GraphQL operation or the gRPC method.
+    private var rowTitle: String {
+        if tx.state == .tunneled { return "\(tx.host):\(tx.port)" }
+        if let rpc = GRPC.label(tx) { return rpc }
+        if let op = GraphQL.label(tx) { return "\(tx.path.split(separator: "?").first.map(String.init) ?? tx.path) · \(op)" }
+        return tx.path
+    }
 }
 
 // MARK: - Sidebar

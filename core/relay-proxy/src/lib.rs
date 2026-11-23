@@ -9,6 +9,7 @@ pub mod client;
 pub mod compose;
 pub mod dns;
 pub mod procinfo;
+pub mod protobuf;
 mod proxy;
 pub mod rules;
 pub mod setup;

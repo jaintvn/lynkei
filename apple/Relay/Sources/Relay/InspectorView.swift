@@ -48,7 +48,7 @@ struct InspectorView: View {
                     .font(.system(size: 13, weight: .medium, design: .monospaced))
                     .lineLimit(1).truncationMode(.middle)
             }
-            Text("\(tx.host) · \(Analytics.deviceLabel(tx)) · \(clock(tx.startedAtMs))")
+            Text("\(tx.host) · \(Analytics.appName(tx)) · \(Analytics.deviceLabel(tx)) · \(clock(tx.startedAtMs))")
                 .font(.system(size: 12)).foregroundStyle(Theme.muted).lineLimit(1)
             FlowLayout(spacing: 6) {
                 Button { store.addQuickRule("breakpoint", for: tx) } label: {

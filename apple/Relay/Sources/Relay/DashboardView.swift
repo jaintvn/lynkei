@@ -14,7 +14,7 @@ struct DashboardView: View {
                 deviceChips
             }
             TimelineView(.periodic(from: .now, by: 1)) { _ in
-                let m = Metrics(store.transactions)
+                let m = Metrics(store.scope(store.transactions))
                 ScrollView {
                     VStack(alignment: .leading, spacing: 16) {
                         title(m)
@@ -39,26 +39,51 @@ struct DashboardView: View {
 
     // MARK: Pieces
 
+    /// Devices that are connected or have sent traffic; the one with the newest call is the active one.
+    private var deviceNames: [String] {
+        let ds = store.deviceStore()
+        var names = ds.devices.filter { ds.isConnected($0) }.map(\.name)
+        for t in store.transactions.suffix(300) { let n = Analytics.deviceLabel(t); if !names.contains(n) { names.append(n) } }
+        return names
+    }
+
+    private var activeDevice: String? {
+        store.transactions.last.map(Analytics.deviceLabel) ?? deviceNames.first
+    }
+
     private var deviceChips: some View {
         let ds = store.deviceStore()
-        let live = ds.devices.filter { ds.isConnected($0) }
+        let names = deviceNames
         return HStack(spacing: 6) {
-            chip("All devices", on: store.source == nil) { store.source = nil }
-            ForEach(Array(store.processesSeen.prefix(2)), id: \.name) { p in
-                let key = "app:\(p.name.contains(" ") ? "\"\(p.name)\"" : p.name)"
-                chip(p.name, on: store.source == key) { store.source = key }
+            chip("All devices", on: store.deviceFilter == nil) { store.deviceFilter = nil }
+            ForEach(names, id: \.self) { n in
+                chip(n, on: store.deviceFilter == n, live: n == activeDevice) { store.deviceFilter = store.deviceFilter == n ? nil : n }
             }
-            if live.isEmpty && store.processesSeen.isEmpty {
-                chip("Connect device…", on: false) { sheets.showConnect = true }
+            if names.isEmpty { chip("Connect device…", on: false) { sheets.showConnect = true } }
+            Menu {
+                Button("All apps") { store.appFilter = nil }
+                if !store.processesSeen.isEmpty { Divider() }
+                ForEach(store.processesSeen, id: \.name) { p in Button("\(p.name)  (\(p.count))") { store.appFilter = p.name } }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "app.dashed").font(.system(size: 11))
+                    Text(store.appFilter ?? "All apps").font(.system(size: 12.5, weight: store.appFilter == nil ? .regular : .medium))
+                    Image(systemName: "chevron.down").font(.system(size: 8, weight: .bold)).foregroundStyle(Theme.muted)
+                }
+                .padding(.horizontal, 11).frame(height: 30)
+                .background(RoundedRectangle(cornerRadius: 8).fill(store.appFilter == nil ? .clear : Theme.selection))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(store.appFilter == nil ? Theme.line2 : Theme.accent))
             }
+            .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
         }
         .onAppear { ds.startWatching() }
     }
 
-    private func chip(_ label: String, on: Bool, action: @escaping () -> Void) -> some View {
+    private func chip(_ label: String, on: Bool, live: Bool = false, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             HStack(spacing: 7) {
                 Circle().fill(Theme.s2xx).frame(width: 7, height: 7)
+                    .shadow(color: live ? Theme.s2xx.opacity(0.8) : .clear, radius: 4)
                 Text(label).font(.system(size: 12.5, weight: on ? .medium : .regular))
             }
             .padding(.horizontal, 11).frame(height: 30)
@@ -69,11 +94,27 @@ struct DashboardView: View {
     }
 
     private func title(_ m: Metrics) -> some View {
-        let apps = Set(store.transactions.compactMap(\.clientProcess)).count
-        return HStack(alignment: .firstTextBaseline, spacing: 12) {
-            Text(m.mainApp.map { "\($0) · live" } ?? "Live traffic").font(.system(size: 22, weight: .semibold)).tracking(-0.4)
-            Text("Last 15 minutes · \(m.window.count.formatted()) requests across \(max(apps, m.window.isEmpty ? 0 : 1)) app\(apps == 1 ? "" : "s")")
-                .foregroundStyle(Theme.muted)
+        let app = store.appFilter ?? m.mainApp
+        let device = store.deviceFilter ?? activeDevice
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                Text(app.map { "\($0) · live" } ?? "Live traffic").font(.system(size: 22, weight: .semibold)).tracking(-0.4)
+                Text("Last 15 minutes · \(m.window.count.formatted()) requests")
+                    .foregroundStyle(Theme.muted)
+            }
+            HStack(spacing: 14) {
+                if let device {
+                    Label { Text("Active device ").foregroundStyle(Theme.muted) + Text(device).fontWeight(.medium) } icon: {
+                        Circle().fill(Theme.s2xx).frame(width: 7, height: 7)
+                    }
+                }
+                if let app {
+                    Label { Text("App ").foregroundStyle(Theme.muted) + Text(app).fontWeight(.medium) } icon: {
+                        Image(systemName: "app.dashed").font(.system(size: 11)).foregroundStyle(Theme.muted)
+                    }
+                }
+            }
+            .font(.system(size: 12.5))
         }
     }
 
@@ -297,7 +338,7 @@ private struct Metrics {
         hosts = h.map { ($0.key, $0.value) }.sorted { $0.1 > $1.1 }
         latest = Array(all.suffix(6).reversed())
         var apps: [String: Int] = [:]
-        for t in window { if let p = t.clientProcess { apps[p, default: 0] += 1 } }
+        for t in window { apps[Analytics.appName(t), default: 0] += 1 }
         mainApp = apps.max { $0.value < $1.value }?.key
     }
 }

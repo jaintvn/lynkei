@@ -63,10 +63,40 @@ enum Analytics {
         return ""
     }
 
-    /// The device or program that made the call.
-    static func deviceLabel(_ t: FfiTransaction) -> String {
-        if let p = t.clientProcess, !p.isEmpty { return p }
+    /// Set from the device list so calls forwarded over adb can be named after the phone.
+    nonisolated(unsafe) static var androidDevice: String?
+
+    private static let forwarders: Set<String> = ["adb", "emulator", "ssh", "socat"]
+    private static let genericAgents = ["okhttp", "dalvik", "cfnetwork", "mozilla", "java", "go-http-client", "python-requests",
+                                        "curl", "apache-httpclient", "urlsession", "alamofire", "node", "axios", "dart", "libcurl"]
+
+    /// True when the connection came through a tunnel (adb reverse, an emulator) rather than from an app on this Mac.
+    static func isForwarded(_ t: FfiTransaction) -> Bool {
+        guard let p = t.clientProcess?.lowercased(), !p.isEmpty else { return false }
+        return forwarders.contains(p) || p.hasPrefix("qemu") || p.hasPrefix("adb")
+    }
+
+    /// The app's own name from its User-Agent (`AcmeShop/3.4.1 CFNetwork/…` gives `AcmeShop`), unless it is just an HTTP library.
+    static func userAgentApp(_ t: FfiTransaction) -> String? {
+        guard let ua = t.requestHeaders.first(where: { $0.name.lowercased() == "user-agent" })?.value else { return nil }
+        let token = ua.split(whereSeparator: { $0 == "/" || $0 == " " }).first.map(String.init) ?? ""
+        guard !token.isEmpty, !genericAgents.contains(token.lowercased()) else { return nil }
+        return token.removingPercentEncoding ?? token
+    }
+
+    /// The app that made the call: the Mac program, or for a phone the app named in its User-Agent.
+    static func appName(_ t: FfiTransaction) -> String {
+        let p = t.clientProcess ?? ""
+        if !p.isEmpty, !isForwarded(t) { return p }
+        if let ua = userAgentApp(t) { return ua }
+        if isForwarded(t) { return "\(androidDevice ?? "Android") app" }
         return t.clientAddr.split(separator: ":").first.map(String.init) ?? t.clientAddr
+    }
+
+    /// The device the call came from.
+    static func deviceLabel(_ t: FfiTransaction) -> String {
+        if isForwarded(t) { return androidDevice ?? "Android" }
+        return "This Mac"
     }
 }
 

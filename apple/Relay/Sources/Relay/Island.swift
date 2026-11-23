@@ -62,8 +62,16 @@ final class IslandController {
     @ObservationIgnored private var lastSpikeAlert = Date.distantPast
     @ObservationIgnored private var knownConnected: Set<String>?
 
-    private static let ear: CGFloat = 58
-    private static let expandedWidth: CGFloat = 460
+    static let earWidth: CGFloat = 108
+    private static let ear = earWidth
+    private static let expandedWidth: CGFloat = 420
+
+    /// Device chosen in the expanded island (nil: whichever is sending).
+    var focusDevice: String?
+    /// The device named in the compact island: the chosen one, else the one that sent the newest call.
+    var focusedDevice: String {
+        focusDevice ?? store.transactions.last.map(Analytics.deviceLabel) ?? "Relay"
+    }
 
     init(store: TrafficStore) {
         self.store = store
@@ -260,8 +268,9 @@ final class IslandController {
                 ? CGSize(width: max(380, compactWidth), height: g.barHeight + 46)
                 : CGSize(width: compactWidth, height: g.barHeight)
         }
-        let devices: CGFloat = deviceRows > 0 ? 30 + CGFloat(deviceRows) * 28 : 0
-        return CGSize(width: max(expandedWidth, compactWidth), height: g.barHeight + (held ? 372 : 292) + devices + 38)
+        return held
+            ? CGSize(width: max(400, compactWidth), height: g.barHeight + 6 + 98)
+            : CGSize(width: max(expandedWidth, compactWidth), height: g.barHeight + 6 + 286)
     }
 }
 
@@ -283,11 +292,18 @@ struct IslandView: View {
         let g = island.geometry
         ZStack(alignment: .top) {
             UnevenRoundedRectangle(
-                bottomLeadingRadius: island.expanded ? 24 : 14, bottomTrailingRadius: island.expanded ? 24 : 14
+                bottomLeadingRadius: island.expanded ? 26 : 14, bottomTrailingRadius: island.expanded ? 26 : 14
             )
             .fill(.black)
+            .overlay {
+                if island.expanded && !store.paused.isEmpty {
+                    UnevenRoundedRectangle(bottomLeadingRadius: 26, bottomTrailingRadius: 26)
+                        .stroke(Color(hex: 0xFF9F43).opacity(0.45), lineWidth: 1)
+                }
+            }
             if island.expanded {
-                IslandExpanded(island: island, store: store).padding(.top, g.barHeight + 6)
+                IslandExpanded(island: island, store: store)
+                    .padding(.top, g.barHeight + 6).padding(.horizontal, 16).padding(.bottom, 16)
                     .transition(.opacity)
             } else {
                 VStack(spacing: 0) {
@@ -304,7 +320,7 @@ struct IslandView: View {
     }
 }
 
-/// The part that shows beside the notch: a pulse on the left, a count or alert on the right.
+/// The part that shows beside the notch: the focused device on the left, the live rate and a failure badge on the right.
 struct IslandCompact: View {
     let island: IslandController
     let store: TrafficStore
@@ -312,190 +328,206 @@ struct IslandCompact: View {
     var body: some View {
         let g = island.geometry
         TimelineView(.periodic(from: .now, by: 1)) { _ in
-            let rate = island.calls(inLast: 5)
+            let rate = Double(island.calls(inLast: 5)) / 5
             let held = store.paused.count
+            let device = island.focusedDevice
             HStack(spacing: 0) {
                 HStack(spacing: 6) {
-                    Circle()
-                        .fill(held > 0 ? Theme.paused : (store.isRunning ? (rate > 0 ? Theme.s2xx : Theme.faint) : Theme.s5xx))
-                        .frame(width: 7, height: 7)
-                        .shadow(color: held > 0 ? Theme.paused : Theme.s2xx.opacity(rate > 0 ? 0.9 : 0), radius: 4)
-                    if held > 0 {
-                        Text("\(held) held").font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.paused)
-                    } else if rate > 0 {
-                        Text("\(rate)").font(.system(size: 11, weight: .semibold, design: .monospaced)).foregroundStyle(Theme.muted)
-                    }
+                    Image(systemName: device.lowercased().contains("pixel") || device.lowercased().contains("android") ? "smartphone" : "iphone")
+                        .font(.system(size: 11)).foregroundStyle(held > 0 ? Theme.paused : Theme.s2xx)
+                    Text(device).font(.system(size: 12, weight: .semibold)).foregroundStyle(.white).lineLimit(1)
                 }
-                .frame(width: 58, alignment: .center)
+                .frame(width: IslandController.earWidth - 14, alignment: .leading)
+                .padding(.leading, 14)
                 Spacer(minLength: g.notchWidth)
-                Group {
+                HStack(spacing: 7) {
+                    Circle().fill(held > 0 ? Theme.paused : (store.isRunning ? Theme.accent : Theme.s5xx))
+                        .frame(width: 6, height: 6)
+                        .overlay(Circle().stroke((held > 0 ? Theme.paused : Theme.accent).opacity(0.3), lineWidth: 3))
+                    Text(held > 0 ? "\(held) held" : String(format: "%.0f/s", rate.rounded()))
+                        .font(.system(size: 11.5, design: .monospaced)).foregroundStyle(.white)
                     if island.unseenFailures > 0 {
                         Text("\(island.unseenFailures)")
-                            .font(.system(size: 10.5, weight: .bold, design: .monospaced))
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 6).padding(.vertical, 1.5)
-                            .background(Capsule().fill(Theme.s5xx))
-                    } else {
-                        Image(systemName: "arrow.triangle.swap").font(.system(size: 10.5, weight: .semibold)).foregroundStyle(Theme.faint)
+                            .font(.system(size: 10.5, weight: .bold))
+                            .foregroundStyle(Color(hex: 0x0D0E11))
+                            .padding(.horizontal, 4).frame(minWidth: 16, minHeight: 16)
+                            .background(Capsule().fill(Color(hex: 0xFF6B70)))
                     }
                 }
-                .frame(width: 58, alignment: .center)
+                .frame(width: IslandController.earWidth - 14, alignment: .trailing)
+                .padding(.trailing, 14)
             }
             .frame(height: g.barHeight)
         }
     }
 }
 
-/// Hover or click: the latest calls, rule toggles, and the breakpoint card when something is held.
+/// Hover or click: device tabs, the last five calls and one switch per tool. A held call replaces
+/// them with the breakpoint card (Continue / Edit / Abort).
 struct IslandExpanded: View {
     let island: IslandController
     let store: TrafficStore
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            header
-            if let held = store.paused.first { breakpoint(held) }
-            VStack(alignment: .leading, spacing: 2) {
-                Text("LATEST CALLS").font(.system(size: 10, weight: .semibold)).foregroundStyle(Theme.faint)
-                let latest = Array(store.transactions.suffix(5).reversed())
-                if latest.isEmpty {
-                    Text(store.isRunning ? "Waiting for traffic…" : "Relay is stopped")
-                        .font(.system(size: 12)).foregroundStyle(Theme.muted).padding(.vertical, 8)
-                }
-                ForEach(latest) { tx in
-                    Button { island.open(tx) } label: { callRow(tx) }.buttonStyle(.plain)
-                }
+        if let held = store.paused.first {
+            breakpoint(held)
+        } else {
+            VStack(alignment: .leading, spacing: 12) {
+                deviceTabs
+                calls
+                toggles
             }
-            devicesSection
-            Spacer(minLength: 0)
-            networkRow
-            toggles
         }
-        .padding(.horizontal, 18)
-        .padding(.bottom, 16)
     }
 
-    /// Simulators and phones Relay can see, with a one-tap connect or disconnect.
-    @ViewBuilder private var devicesSection: some View {
+    private var deviceNames: [String] {
         let ds = store.deviceStore()
-        let shown = Array(ds.devices.prefix(3))
-        if !shown.isEmpty {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("DEVICES").font(.system(size: 10, weight: .semibold)).foregroundStyle(Theme.faint)
-                ForEach(shown, id: \.id) { d in
-                    let on = ds.isConnected(d)
-                    HStack(spacing: 8) {
-                        Image(systemName: d.kind.hasPrefix("ios") ? "iphone" : "smartphone")
-                            .foregroundStyle(on ? Theme.s2xx : Theme.faint).frame(width: 18)
-                        Text(d.name).font(.system(size: 12, weight: .medium)).lineLimit(1)
-                        Text(d.os).font(.system(size: 11)).foregroundStyle(Theme.faint).lineLimit(1)
-                        Spacer()
-                        if ds.busy.contains(d.id) {
-                            ProgressView().controlSize(.mini)
-                        } else {
-                            Button(on ? "Disconnect" : "Connect") {
-                                Task { on ? await ds.disconnect(d) : await ds.connect(d) }
-                            }
-                            .buttonStyle(IslandChip(on: !on))
-                        }
+        var names = ds.devices.filter { ds.isConnected($0) }.map(\.name)
+        for t in store.transactions.suffix(200) { let n = Analytics.deviceLabel(t); if !names.contains(n) { names.append(n) } }
+        return Array(names.prefix(3))
+    }
+
+    private var deviceTabs: some View {
+        HStack(spacing: 6) {
+            let names = deviceNames
+            if names.isEmpty {
+                Text(store.isRunning ? "Waiting for a device…" : "Relay is stopped")
+                    .font(.system(size: 12)).foregroundStyle(.white.opacity(0.62)).frame(height: 34)
+            }
+            ForEach(names, id: \.self) { n in
+                let on = island.focusedDevice == n
+                let rate = store.transactions.suffix(300).filter { Analytics.deviceLabel($0) == n && Double($0.startedAtMs) > (Date().timeIntervalSince1970 - 5) * 1000 }.count / 5
+                Button { island.focusDevice = n } label: {
+                    HStack(spacing: 7) {
+                        Circle().fill(Color(hex: 0x3DD68C)).frame(width: 6, height: 6)
+                        Text(n).font(.system(size: 12, weight: .semibold)).lineLimit(1)
+                        Spacer(minLength: 0)
+                        Text("\(rate)/s").font(.system(size: 11, design: .monospaced)).foregroundStyle(.white.opacity(0.62))
                     }
+                    .padding(.horizontal, 10).frame(maxWidth: .infinity).frame(height: 34)
+                    .background(RoundedRectangle(cornerRadius: 10).fill(on ? Color.white.opacity(0.10) : .clear))
+                    .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.white.opacity(on ? 0.18 : 0.08)))
+                    .contentShape(Rectangle())
                 }
-                if ds.devices.count > shown.count {
-                    Text("+\(ds.devices.count - shown.count) more in Connect device").font(.system(size: 11)).foregroundStyle(Theme.faint)
-                }
+                .buttonStyle(.plain)
             }
         }
     }
 
-    /// Global switches: decrypt HTTPS or not, and slow the whole network with a preset.
-    private var networkRow: some View {
-        HStack(spacing: 8) {
-            Button(store.decrypt ? "SSL decrypt: On" : "SSL decrypt: Off") { store.setDecrypt(!store.decrypt) }
-                .buttonStyle(IslandChip(on: store.decrypt))
-                .help(store.decrypt ? "HTTPS is decrypted so you can read it" : "HTTPS passes through untouched; you see hosts and sizes only")
-            Menu {
-                Button("Normal") { store.setGlobalThrottle(nil) }
-                Divider()
-                ForEach(store.throttlePresets, id: \.self) { p in
-                    Button(p == "offline" ? "Offline" : p.uppercased()) { store.setGlobalThrottle(p) }
-                }
-            } label: {
-                Text(store.globalThrottle.map { "Throttle: \($0 == "offline" ? "Offline" : $0.uppercased())" } ?? "Throttle: Off")
-                    .font(.system(size: 11.5, weight: .semibold))
-                    .foregroundStyle(store.globalThrottle == nil ? Theme.fg : Color.black)
-                    .padding(.horizontal, 10).padding(.vertical, 4)
-                    .background(Capsule().fill(store.globalThrottle == nil ? Color.white.opacity(0.1) : Theme.paused))
+    private var calls: some View {
+        let device = island.focusDevice
+        let rows = store.transactions.reversed().lazy.filter { device == nil || Analytics.deviceLabel($0) == device }.prefix(5)
+        return VStack(spacing: 2) {
+            if rows.isEmpty {
+                Text("No calls yet").font(.system(size: 12)).foregroundStyle(.white.opacity(0.62)).frame(height: 26)
             }
-            .menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden).fixedSize()
-            Spacer()
+            ForEach(Array(rows)) { tx in
+                Button { island.open(tx) } label: {
+                    HStack(spacing: 8) {
+                        Text(statusText(tx)).font(.system(size: 11, weight: .bold, design: .monospaced))
+                            .foregroundStyle(islandStatusColor(tx)).frame(width: 40, alignment: .leading)
+                        Text(tx.method).font(.system(size: 11, design: .monospaced)).foregroundStyle(.white.opacity(0.62))
+                            .frame(width: 42, alignment: .leading)
+                        Text(tx.path).font(.system(size: 11.5, design: .monospaced)).lineLimit(1).truncationMode(.tail)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        Text(verbatim: tx.state == .inProgress || tx.durationMs == 0 ? "—" : (tx.durationMs >= 1000 ? String(format: "%.2f s", Double(tx.durationMs) / 1000) : "\(tx.durationMs) ms"))
+                            .font(.system(size: 11, design: .monospaced)).foregroundStyle(.white.opacity(0.7))
+                            .frame(width: 50, alignment: .trailing)
+                    }
+                    .padding(.horizontal, 6).frame(height: 26)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
         }
     }
 
-    private var header: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "arrow.triangle.swap").foregroundStyle(Theme.accent)
-            Text("Relay").font(.system(size: 13, weight: .semibold))
-            Text(store.isRunning ? "Recording" : "Stopped").font(.system(size: 12)).foregroundStyle(Theme.muted)
-            Spacer()
-            Button(store.isRunning ? "Stop" : "Start") { store.isRunning ? store.stop() : store.start() }
-                .buttonStyle(IslandChip(on: store.isRunning))
-            Button("Open") { island.showMainWindow() }.buttonStyle(IslandChip(on: false))
+    private func statusText(_ tx: FfiTransaction) -> String {
+        switch tx.state {
+        case .failed: return "ERR"
+        case .tunneled: return "TUN"
+        default: return tx.status.map(String.init) ?? "…"
+        }
+    }
+
+    private func islandStatusColor(_ tx: FfiTransaction) -> Color {
+        if tx.state == .failed { return Color(hex: 0xFF6B70) }
+        switch (tx.status ?? 0) / 100 {
+        case 2: return Color(hex: 0x3DD68C)
+        case 3: return Color(hex: 0x9AACC6)
+        case 4: return Color(hex: 0xF5B544)
+        case 5: return Color(hex: 0xFF6B70)
+        default: return .white.opacity(0.62)
+        }
+    }
+
+    /// Proxy, SSL, Breakpoints, Rewrite, Map Local, Throttle.
+    private var toggles: some View {
+        func rulesOn(_ kind: String) -> Bool { store.rules.contains { $0.kind == kind && $0.enabled } }
+        func flip(_ kind: String) {
+            let rules = store.rules.filter { $0.kind == kind }
+            let on = rules.contains(where: \.enabled)
+            rules.forEach { store.setRule($0.id, enabled: !on) }
+        }
+        let items: [(String, Bool, Color, () -> Void)] = [
+            ("Proxy", store.isRunning, Color(hex: 0x7C8CFF), { store.isRunning ? store.stop() : store.start() }),
+            ("SSL", store.decrypt, Color(hex: 0x3DD68C), { store.setDecrypt(!store.decrypt) }),
+            ("Breakpoints", rulesOn("breakpoint"), Color(hex: 0xFF9F43), { flip("breakpoint") }),
+            ("Rewrite", rulesOn("rewrite"), Color(hex: 0x3DD68C), { flip("rewrite") }),
+            ("Map Local", rulesOn("map local"), Color(hex: 0x3DD68C), { flip("map local") }),
+            ("Throttle", store.globalThrottle != nil, Color(hex: 0x3DD68C), { store.setGlobalThrottle(store.globalThrottle == nil ? "3g" : nil) }),
+        ]
+        return LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: 3), spacing: 6) {
+            ForEach(items, id: \.0) { label, on, dot, action in
+                Button(action: action) {
+                    HStack(spacing: 7) {
+                        Circle().fill(on ? dot : Color.white.opacity(0.25)).frame(width: 7, height: 7)
+                        Text(label).font(.system(size: 12, weight: .semibold)).lineLimit(1)
+                        Spacer(minLength: 0)
+                    }
+                    .foregroundStyle(on ? Color(hex: 0xF2F3F6) : .white.opacity(0.62))
+                    .padding(.horizontal, 10).frame(height: 34)
+                    .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(on ? 0.12 : 0.04)))
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
         }
     }
 
     private func breakpoint(_ p: FfiPaused) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 6) {
-                Image(systemName: "pause.circle.fill").foregroundStyle(Theme.paused)
-                Text(p.response ? "Response held" : "Request held").font(.system(size: 12, weight: .semibold))
-                Text("rule \(p.rule)").font(.system(size: 11)).foregroundStyle(Theme.muted)
-                if store.paused.count > 1 { Text("+\(store.paused.count - 1) more").font(.system(size: 11)).foregroundStyle(Theme.muted) }
-            }
-            Text("\(p.method) \(p.url)").font(.system(size: 11.5, design: .monospaced)).foregroundStyle(Theme.fg)
-                .lineLimit(2).truncationMode(.middle)
-            HStack(spacing: 8) {
-                Button("Continue") { store.resumePaused(p, edit: nil) }.buttonStyle(IslandChip(on: true))
-                Button("Edit…") { island.showMainWindow() }.buttonStyle(IslandChip(on: false))
-                Button("Abort") { store.abortPaused(p) }.buttonStyle(IslandChip(on: false, danger: true))
-            }
-        }
-        .padding(10)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 12).fill(Theme.paused.opacity(0.13)))
-    }
-
-    private func callRow(_ tx: FfiTransaction) -> some View {
-        HStack(spacing: 8) {
-            StatusPill(tx: tx).frame(width: 50, alignment: .leading)
-            Text(tx.method).font(Theme.monoSmall).foregroundStyle(Theme.muted).lineLimit(1).frame(width: 66, alignment: .leading)
-            Text("\(tx.host)\(tx.path)").font(.system(size: 11.5, design: .monospaced)).foregroundStyle(Theme.fg)
-                .lineLimit(1).truncationMode(.middle)
-            Spacer(minLength: 4)
-            Text(tx.state == .inProgress ? "…" : "\(tx.durationMs) ms")
-                .font(.system(size: 11, design: .monospaced)).foregroundStyle(Theme.faint)
-        }
-        .padding(.vertical, 3)
-        .contentShape(Rectangle())
-    }
-
-    /// One switch per kind of rule that exists (all rules of that kind on or off together).
-    @ViewBuilder private var toggles: some View {
-        let kinds = Dictionary(grouping: store.rules, by: \.kind)
-        if kinds.isEmpty {
-            Text("No rules yet. Right-click a request in the main window to add one.")
-                .font(.system(size: 11)).foregroundStyle(Theme.faint)
-        } else {
-            HStack(spacing: 6) {
-                ForEach(kinds.keys.sorted(), id: \.self) { kind in
-                    let rules = kinds[kind] ?? []
-                    let on = rules.allSatisfy(\.enabled)
-                    Button(kind.capitalized) { rules.forEach { store.setRule($0.id, enabled: !on) } }
-                        .buttonStyle(IslandChip(on: on))
-                        .help(on ? "Turn off \(rules.count) \(kind) rule(s)" : "Turn on \(rules.count) \(kind) rule(s)")
+        let path = URL(string: p.url).map { $0.path.isEmpty ? "/" : $0.path } ?? p.url
+        return VStack(spacing: 12) {
+            HStack(spacing: 10) {
+                Image(systemName: "pause.fill").font(.system(size: 13)).foregroundStyle(Color(hex: 0xFF9F43))
+                    .frame(width: 34, height: 34)
+                    .background(RoundedRectangle(cornerRadius: 10).fill(Color(hex: 0xFF9F43).opacity(0.18)))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Paused · \(island.focusedDevice) · \(p.response ? "response" : "request")")
+                        .font(.system(size: 11.5, weight: .semibold)).foregroundStyle(Color(hex: 0xFF9F43)).lineLimit(1)
+                    Text("\(p.method) \(path)").font(.system(size: 13, weight: .semibold, design: .monospaced))
+                        .lineLimit(1).truncationMode(.middle)
                 }
-                Spacer()
+                Spacer(minLength: 0)
+                if store.paused.count > 1 {
+                    Text("+\(store.paused.count - 1)").font(.system(size: 11.5, design: .monospaced)).foregroundStyle(.white.opacity(0.62))
+                }
+            }
+            HStack(spacing: 6) {
+                bpButton("Continue", fill: Color(hex: 0x7C8CFF), fg: Color(hex: 0x0D0E11)) { store.resumePaused(p, edit: nil) }
+                bpButton("Edit", fill: Color.white.opacity(0.10), fg: Color(hex: 0xF2F3F6)) { island.showMainWindow() }
+                bpButton("Abort", fill: Color(hex: 0xFF6B70).opacity(0.16), fg: Color(hex: 0xFF8A8E)) { store.abortPaused(p) }
             }
         }
+    }
+
+    private func bpButton(_ title: String, fill: Color, fg: Color, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title).font(.system(size: 13, weight: .semibold)).foregroundStyle(fg)
+                .frame(maxWidth: .infinity).frame(height: 36)
+                .background(RoundedRectangle(cornerRadius: 10).fill(fill))
+        }
+        .buttonStyle(.plain)
     }
 }
 

@@ -527,9 +527,8 @@ struct TrafficSidebar: View {
                 Text("Apps show up as they make requests").font(.system(size: 12)).foregroundStyle(Theme.faint).padding(.horizontal, 8)
             }
             ForEach(Array(procs), id: \.name) { p in
-                let key = "app:\(p.name.contains(" ") ? "\"\(p.name)\"" : p.name)"
-                let on = store.source == key
-                Button { store.source = on ? nil : key } label: {
+                let on = store.appFilter == p.name
+                Button { store.appFilter = on ? nil : p.name } label: {
                     HStack(spacing: 9) {
                         Text(String(p.name.prefix(1)).uppercased())
                             .font(.system(size: 10, weight: .bold)).foregroundStyle(.white)

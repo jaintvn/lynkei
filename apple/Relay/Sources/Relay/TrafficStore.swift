@@ -22,6 +22,9 @@ final class TrafficStore {
     var search: String = "" { didSet { revision &+= 1 } }
     /// "Only this device/app" choice, as a search term (`app:AcmeShop`, `client:192.168.0.5`).
     var source: String? { didSet { revision &+= 1 } }
+    /// "Only this app / this device" (names as shown in the app, see `Analytics.appName`).
+    var appFilter: String? { didSet { revision &+= 1 } }
+    var deviceFilter: String? { didSet { revision &+= 1 } }
     @ObservationIgnored private var revision = 0
     @ObservationIgnored private var cache: (revision: Int, rows: [FfiTransaction])?
     @ObservationIgnored private var parsed: (query: String, filter: TrafficFilter?, error: String?)?
@@ -166,14 +169,23 @@ final class TrafficStore {
         } else {
             rows = transactions
         }
-        cache = (revision, rows)
-        return rows
+        let scoped = scope(rows)
+        cache = (revision, scoped)
+        return scoped
     }
 
-    /// Programs on this Mac that made requests, with counts, for the Source menu.
+    /// Keeps the calls from the chosen app and device (no filter set: all of them).
+    func scope(_ rows: [FfiTransaction]) -> [FfiTransaction] {
+        guard appFilter != nil || deviceFilter != nil else { return rows }
+        return rows.filter { t in
+            (appFilter == nil || Analytics.appName(t) == appFilter) && (deviceFilter == nil || Analytics.deviceLabel(t) == deviceFilter)
+        }
+    }
+
+    /// Apps that made requests, with counts.
     var processesSeen: [(name: String, count: Int)] {
         var counts: [String: Int] = [:]
-        for t in transactions { if let p = t.clientProcess { counts[p, default: 0] += 1 } }
+        for t in transactions { counts[Analytics.appName(t), default: 0] += 1 }
         return counts.map { ($0.key, $0.value) }.sorted { $0.count > $1.count }
     }
 

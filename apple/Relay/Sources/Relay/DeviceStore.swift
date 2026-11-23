@@ -12,6 +12,8 @@ final class DeviceStore {
     private(set) var errors: [String: String] = [:]
     private(set) var wifiURL: String = ""
     private(set) var scanning = false
+    /// Devices the user disconnected on purpose (so the island does not warn about them).
+    private(set) var userDisconnected: Set<String> = []
 
     private let engine: () -> RelayEngine?
     private var timer: Task<Void, Never>?
@@ -56,6 +58,7 @@ final class DeviceStore {
         busy.insert(device.id)
         errors[device.id] = nil
         let id = device.id
+        userDisconnected.remove(id)
         let outcome: Result<FfiConnectResult, Error> = await Task.detached {
             Result { try engine.connectDevice(id: id) }
         }.value
@@ -71,6 +74,7 @@ final class DeviceStore {
         guard let engine = engine(), !busy.contains(device.id) else { return }
         busy.insert(device.id)
         let id = device.id
+        userDisconnected.insert(id)
         _ = await Task.detached { Result { try engine.disconnectDevice(id: id) } }.value
         results[id] = nil
         busy.remove(id)

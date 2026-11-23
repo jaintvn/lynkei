@@ -33,6 +33,18 @@ final class IslandController {
     /// How many failures the user has already seen (expanding the island marks them seen).
     private(set) var failuresSeen = 0
 
+    /// A short notice that pulses under the notch for a few seconds.
+    struct Alert: Equatable, Identifiable {
+        let id = UUID()
+        var symbol: String
+        var title: String
+        var detail: String
+        var color: Color
+        var until: Date
+    }
+
+    private(set) var alert: Alert?
+
     struct Geometry: Equatable {
         var hasNotch: Bool
         var notchWidth: CGFloat
@@ -45,6 +57,10 @@ final class IslandController {
     @ObservationIgnored private var pinned = false
     @ObservationIgnored private var collapseTask: Task<Void, Never>?
     @ObservationIgnored private var ticker: Task<Void, Never>?
+    @ObservationIgnored private var deviceWatcher: Task<Void, Never>?
+    @ObservationIgnored private var pinningNotified: Set<String> = []
+    @ObservationIgnored private var lastSpikeAlert = Date.distantPast
+    @ObservationIgnored private var knownConnected: Set<String>?
 
     private static let ear: CGFloat = 58
     private static let expandedWidth: CGFloat = 460
@@ -81,7 +97,55 @@ final class IslandController {
                 try? await Task.sleep(nanoseconds: 300_000_000)
             }
         }
+        deviceWatcher = Task { [weak self] in
+            while !Task.isCancelled {
+                await self?.checkDevices()
+                try? await Task.sleep(for: .seconds(6))
+            }
+        }
         refresh()
+    }
+
+    // MARK: Alerts
+
+    private func post(_ symbol: String, _ title: String, _ detail: String, _ color: Color, seconds: Double = 6) {
+        alert = Alert(symbol: symbol, title: title, detail: detail, color: color, until: Date().addingTimeInterval(seconds))
+        refresh()
+    }
+
+    /// Looks at the newest calls for things worth a pulse: pinning, and a burst of failures.
+    private func scanForAlerts() {
+        if let a = alert, a.until < Date() { alert = nil }
+        let tail = store.transactions.suffix(60)
+        for t in tail where t.state == .failed {
+            guard let err = t.error, err.contains("may pin certificates"), !pinningNotified.contains(t.host) else { continue }
+            pinningNotified.insert(t.host)
+            post("lock.trianglebadge.exclamationmark", "Certificate pinning detected", "\(t.host) rejected Relay's certificate", Theme.failed, seconds: 8)
+        }
+        let cutoff = UInt64(max(0, (Date().timeIntervalSince1970 - 10) * 1000))
+        let recent = tail.filter { $0.startedAtMs >= cutoff && isFailure($0) && !($0.error ?? "").contains("may pin certificates") }
+        if recent.count >= 3, Date().timeIntervalSince(lastSpikeAlert) > 60 {
+            lastSpikeAlert = Date()
+            let hosts = Set(recent.map(\.host))
+            post("exclamationmark.triangle.fill", "Failures spiking", "\(recent.count) failed in 10 s" + (hosts.count == 1 ? " on \(hosts.first!)" : " across \(hosts.count) hosts"), Theme.s5xx)
+        }
+    }
+
+    /// Polls devices (a few seconds apart) and warns when a connected one drops away.
+    private func checkDevices() async {
+        guard store.isRunning else { return }
+        let ds = store.deviceStore()
+        await ds.refresh()
+        let connected = Set(ds.devices.filter { ds.isConnected($0) }.map(\.id))
+        defer { knownConnected = connected }
+        guard let before = knownConnected else { return }
+        for id in before.subtracting(connected) where !ds.userDisconnected.contains(id) {
+            post("iphone.slash", "Device disconnected", "\(deviceName(id, ds)) is no longer sending traffic through Relay", Theme.paused, seconds: 8)
+        }
+    }
+
+    private func deviceName(_ id: String, _ ds: DeviceStore) -> String {
+        ds.devices.first { $0.id == id }?.name ?? "A device"
     }
 
     // MARK: Behaviour
@@ -140,12 +204,13 @@ final class IslandController {
 
     private func refresh() {
         guard let panel else { return }
+        scanForAlerts()
         let held = !store.paused.isEmpty
         let busy = calls(inLast: 6) > 0
         let visible: Bool
         switch mode {
         case .always: visible = true
-        case .activity: visible = busy || held || hovering || pinned || expanded
+        case .activity: visible = busy || held || hovering || pinned || expanded || alert != nil
         case .off: visible = false
         }
         let wantExpanded = visible && (hovering || pinned || held)
@@ -157,7 +222,8 @@ final class IslandController {
         let g = Self.geometry(of: screen)
         if wantExpanded && !expanded { failuresSeen = recentFailures }
         if wantExpanded { failuresSeen = recentFailures }
-        let target = Self.targetSize(g, expanded: wantExpanded, held: held)
+        let deviceRows = min(3, store.deviceStore().devices.count)
+        let target = Self.targetSize(g, expanded: wantExpanded, held: held, deviceRows: deviceRows, alert: alert != nil)
         let changed = target != size || g != geometry || wantExpanded != expanded || !panel.isVisible
         guard changed else { return }
         let animate = panel.isVisible
@@ -186,10 +252,16 @@ final class IslandController {
         return Geometry(hasNotch: false, notchWidth: 150, barHeight: 30)
     }
 
-    private static func targetSize(_ g: Geometry, expanded: Bool, held: Bool) -> CGSize {
+    private static func targetSize(_ g: Geometry, expanded: Bool, held: Bool, deviceRows: Int, alert: Bool) -> CGSize {
         let compactWidth = g.notchWidth + 2 * ear
-        guard expanded else { return CGSize(width: compactWidth, height: g.barHeight) }
-        return CGSize(width: max(expandedWidth, compactWidth), height: g.barHeight + (held ? 372 : 292))
+        guard expanded else {
+            // An alert drops a notice line under the notch.
+            return alert
+                ? CGSize(width: max(380, compactWidth), height: g.barHeight + 46)
+                : CGSize(width: compactWidth, height: g.barHeight)
+        }
+        let devices: CGFloat = deviceRows > 0 ? 30 + CGFloat(deviceRows) * 28 : 0
+        return CGSize(width: max(expandedWidth, compactWidth), height: g.barHeight + (held ? 372 : 292) + devices)
     }
 }
 
@@ -216,7 +288,10 @@ struct IslandView: View {
                 IslandExpanded(island: island, store: store).padding(.top, g.barHeight + 6)
                     .transition(.opacity)
             } else {
-                IslandCompact(island: island, store: store)
+                VStack(spacing: 0) {
+                    IslandCompact(island: island, store: store)
+                    if let a = island.alert { IslandAlertBanner(alert: a).transition(.opacity) }
+                }
             }
         }
         .frame(width: island.size.width, height: island.size.height, alignment: .top)
@@ -289,11 +364,44 @@ struct IslandExpanded: View {
                     Button { island.open(tx) } label: { callRow(tx) }.buttonStyle(.plain)
                 }
             }
+            devicesSection
             Spacer(minLength: 0)
             toggles
         }
         .padding(.horizontal, 18)
         .padding(.bottom, 16)
+    }
+
+    /// Simulators and phones Relay can see, with a one-tap connect or disconnect.
+    @ViewBuilder private var devicesSection: some View {
+        let ds = store.deviceStore()
+        let shown = Array(ds.devices.prefix(3))
+        if !shown.isEmpty {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("DEVICES").font(.system(size: 10, weight: .semibold)).foregroundStyle(Theme.faint)
+                ForEach(shown, id: \.id) { d in
+                    let on = ds.isConnected(d)
+                    HStack(spacing: 8) {
+                        Image(systemName: d.kind.hasPrefix("ios") ? "iphone" : "smartphone")
+                            .foregroundStyle(on ? Theme.s2xx : Theme.faint).frame(width: 18)
+                        Text(d.name).font(.system(size: 12, weight: .medium)).lineLimit(1)
+                        Text(d.os).font(.system(size: 11)).foregroundStyle(Theme.faint).lineLimit(1)
+                        Spacer()
+                        if ds.busy.contains(d.id) {
+                            ProgressView().controlSize(.mini)
+                        } else {
+                            Button(on ? "Disconnect" : "Connect") {
+                                Task { on ? await ds.disconnect(d) : await ds.connect(d) }
+                            }
+                            .buttonStyle(IslandChip(on: !on))
+                        }
+                    }
+                }
+                if ds.devices.count > shown.count {
+                    Text("+\(ds.devices.count - shown.count) more in Connect device").font(.system(size: 11)).foregroundStyle(Theme.faint)
+                }
+            }
+        }
     }
 
     private var header: some View {
@@ -361,6 +469,23 @@ struct IslandExpanded: View {
                 Spacer()
             }
         }
+    }
+}
+
+/// The notice line that drops under the notch for a few seconds.
+struct IslandAlertBanner: View {
+    let alert: IslandController.Alert
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: alert.symbol).foregroundStyle(alert.color)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(alert.title).font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.fg)
+                Text(alert.detail).font(.system(size: 11)).foregroundStyle(Theme.muted).lineLimit(1).truncationMode(.middle)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 20)
+        .padding(.top, 4)
     }
 }
 

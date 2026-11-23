@@ -42,6 +42,10 @@ pub enum TermKind {
     },
     /// Request or response body preview contains the text.
     Body(String),
+    /// The program on this Mac that made the request (substring, e.g. `app:chrome`, `app:AcmeShop`).
+    App(String),
+    /// The client's address (prefix), e.g. `client:192.168.0.204` for a phone on Wi-Fi.
+    Client(String),
     DurationMs(Cmp),
     /// Response size in bytes.
     Size(Cmp),
@@ -185,6 +189,8 @@ fn parse_term(tok: &str) -> Result<TermKind, ParseError> {
             },
         },
         "body" => TermKind::Body(value.to_lowercase()),
+        "app" | "process" | "program" => TermKind::App(value.to_lowercase()),
+        "client" | "ip" | "from" => TermKind::Client(value.to_lowercase()),
         "duration" | "time" => TermKind::DurationMs(
             parse_cmp(value, parse_ms)
                 .ok_or_else(|| err("expected a duration like >800ms or <2s"))?,
@@ -195,7 +201,7 @@ fn parse_term(tok: &str) -> Result<TermKind, ParseError> {
         ),
         _ => {
             return Err(ParseError(format!(
-                "unknown filter `{key}:` (try status, method, host, path, duration, size, body, header, state)"
+                "unknown filter `{key}:` (try status, method, host, path, app, client, duration, size, body, header, state)"
             )));
         }
     })
@@ -417,6 +423,11 @@ impl TermKind {
                         .as_deref()
                         .is_some_and(|b| contains_ci(b, s))
             }
+            TermKind::App(a) => t
+                .client_process
+                .as_deref()
+                .is_some_and(|p| p.to_lowercase().contains(a)),
+            TermKind::Client(c) => t.client_addr.to_lowercase().starts_with(c),
             TermKind::DurationMs(c) => cmp(c.op, t.duration_ms, c.value),
             TermKind::Size(c) => cmp(c.op, t.response_body_size, c.value),
         }
@@ -458,6 +469,7 @@ mod tests {
             response_body_preview: Some(r#"{"error":"PAYMENT_PROVIDER_TIMEOUT"}"#.into()),
             client_addr: "10.0.0.2:5000".into(),
             websocket_messages: vec![],
+            client_process: None,
         }
     }
 
@@ -533,6 +545,20 @@ mod tests {
         assert!(m("size:2kb", &t) && m("size:>1k", &t) && !m("size:>1MB", &t));
         assert!(m("version:h2", &t) && m("http:1.1", &t), "either leg");
         assert!(m("state:complete", &t) && m("decrypted:true", &t) && !m("is:failed", &t));
+    }
+
+    #[test]
+    fn app_and_client_terms() {
+        let mut t = tx("GET", "httpbin.org", "/json", Some(200), 10);
+        t.client_process = Some("AcmeShop".into());
+        assert!(m("app:acmeshop", &t) && m("app:shop", &t) && m("process:ACME", &t));
+        assert!(!m("app:chrome", &t));
+        assert!(
+            !m("app:acme", &tx("GET", "a.com", "/", Some(200), 1)),
+            "unknown process never matches"
+        );
+        assert!(m("client:10.0.0.2", &t) && !m("client:192.168", &t));
+        assert!(m("-app:chrome host:httpbin.org", &t));
     }
 
     #[test]

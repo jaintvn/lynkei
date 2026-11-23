@@ -1118,3 +1118,74 @@ async fn auto_passthrough_can_be_turned_off() {
         );
     }
 }
+
+/// Connections from this Mac are labelled with the program that made them (macOS: via lsof).
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn loopback_clients_are_labelled_with_their_program() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let http_port = start_http_origin().await;
+    let (_p, origin_ca) = start_https_origin().await;
+    let (proxy, log, _ca) = start_proxy(origin_ca, &[]).await;
+
+    // Like a real app, keep the connection open after the response (here for 1 s).
+    let mut c = tokio::net::TcpStream::connect(proxy.local_addr)
+        .await
+        .unwrap();
+    c.write_all(
+        format!("GET http://127.0.0.1:{http_port}/who-am-i HTTP/1.1\r\nHost: 127.0.0.1:{http_port}\r\n\r\n")
+            .as_bytes(),
+    )
+    .await
+    .unwrap();
+    let mut buf = [0u8; 1024];
+    let n = c.read(&mut buf).await.unwrap();
+    assert!(String::from_utf8_lossy(&buf[..n]).starts_with("HTTP/1.1 200"));
+
+    // The first event may not know the program yet; the re-sent one does.
+    let mut name = None;
+    for _ in 0..100 {
+        name = log
+            .lock()
+            .unwrap()
+            .iter()
+            .find_map(|t| t.client_process.clone());
+        if name.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    drop(c);
+    let name = name.expect("the program behind a loopback connection is named");
+    assert!(
+        name.starts_with("e2e-"),
+        "this test binary is the client, got {name:?}"
+    );
+}
+
+#[tokio::test]
+async fn labelling_can_be_turned_off() {
+    let http_port = start_http_origin().await;
+    let (_p, origin_ca) = start_https_origin().await;
+    let dir = std::env::temp_dir().join(format!("relay-e2e-noproc-{}", rand_suffix()));
+    let mut cfg = ProxyConfig::new("127.0.0.1:0".parse().unwrap(), &dir);
+    cfg.extra_upstream_roots = vec![origin_ca];
+    cfg.identify_client_process = false;
+    let log: Log = Arc::default();
+    let l = log.clone();
+    let proxy = relay_proxy::start(
+        cfg,
+        Arc::new(move |t: Transaction| l.lock().unwrap().push(t)),
+    )
+    .await
+    .unwrap();
+    fetch_via_proxy(
+        proxy.local_addr,
+        &format!("http://127.0.0.1:{http_port}/x"),
+        &[],
+    )
+    .await
+    .unwrap();
+    let t = wait_for(&log, 1).await.remove(0);
+    assert_eq!(t.client_process, None);
+}

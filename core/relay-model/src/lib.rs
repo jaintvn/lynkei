@@ -91,6 +91,10 @@ pub struct Transaction {
     /// Frames of an upgraded WebSocket connection (capped per connection).
     #[serde(default)]
     pub websocket_messages: Vec<WsMessage>,
+    /// The program on this Mac that opened the connection ("Google Chrome", "AcmeShop"), when known.
+    /// Only available for connections from this Mac (including iOS Simulator apps).
+    #[serde(default)]
+    pub client_process: Option<String>,
 }
 
 fn default_version() -> String {
@@ -149,6 +153,7 @@ mod tests {
             response_body_preview: None,
             client_addr: "127.0.0.1:5000".into(),
             websocket_messages: vec![],
+            client_process: None,
         }
     }
 

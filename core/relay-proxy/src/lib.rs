@@ -5,6 +5,7 @@
 pub mod body;
 pub mod ca;
 pub mod client;
+pub mod procinfo;
 mod proxy;
 pub mod setup;
 pub mod sniff;
@@ -53,6 +54,8 @@ pub struct ProxyConfig {
     /// is most Android apps), pass that host through untouched from then on, so the app keeps
     /// working. The first refused connection still fails; the app's retry then succeeds.
     pub auto_passthrough: bool,
+    /// Name the program on this Mac behind each loopback connection (macOS only).
+    pub identify_client_process: bool,
     /// Extra trusted roots for upstream servers (tests, corporate CAs).
     pub extra_upstream_roots: Vec<CertificateDer<'static>>,
 }
@@ -69,6 +72,7 @@ impl ProxyConfig {
             port_fallback: 10,
             tunnel_half_close_grace: Duration::from_secs(5),
             auto_passthrough: true,
+            identify_client_process: cfg!(target_os = "macos"),
             extra_upstream_roots: vec![],
         }
     }

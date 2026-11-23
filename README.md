@@ -85,9 +85,12 @@ In another terminal:
 ```
 status:5xx  status:>=400  method:POST  host:acmeshop.com  path:/v2/*  duration:>800ms  size:>1MB
 body:"out of stock"  header:x-app-version=3.4  state:failed|tunneled|open  decrypted:true  version:h2
+app:AcmeShop  client:192.168.0.5
 ```
 
-Bare words match the URL, headers and bodies. Put `-` in front of a term to negate it, and quote values that contain spaces.
+Bare words match the URL, headers and bodies. `app:` is the program on this Mac that made the request (the Simulator app, a browser, curl); `client:` is the sender's IP. Put `-` in front of a term to negate it, and quote values that contain spaces.
+
+In the Mac app the search box uses this language, the **App** column shows which program made each request, and the **All apps** menu limits the list to one program, so a Simulator app's calls are not buried under the rest of your Mac's traffic.
 
 ## Mac app
 

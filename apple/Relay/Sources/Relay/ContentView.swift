@@ -48,7 +48,7 @@ struct ContentView: View {
 
             HStack(spacing: 8) {
                 Image(systemName: "magnifyingglass").foregroundStyle(Theme.muted)
-                TextField("Filter by URL or method", text: search)
+                TextField("Search: app:AcmeShop host:api status:5xx header:user-agent=…", text: search)
                     .textFieldStyle(.plain)
                     .font(Theme.mono)
             }
@@ -56,7 +56,11 @@ struct ContentView: View {
             .frame(height: 30)
             .background(RoundedRectangle(cornerRadius: 9).fill(Theme.raised))
             .overlay(RoundedRectangle(cornerRadius: 9).stroke(Theme.line2))
+            .overlay(RoundedRectangle(cornerRadius: 9).stroke(store.searchError == nil ? Color.clear : Theme.s5xx))
+            .help(store.searchError ?? "Filter language: app: client: host: path: method: status: header:name=value body: duration: size:")
             .frame(maxWidth: 520)
+
+            sourceMenu
 
             Spacer()
 
@@ -87,6 +91,27 @@ struct ContentView: View {
         .background(Theme.panel)
     }
 
+    private var sourceMenu: some View {
+        Menu {
+            Button("All traffic") { store.source = nil }
+            let procs = store.processesSeen
+            if !procs.isEmpty { Divider() }
+            ForEach(procs, id: \.name) { p in
+                Button("\(p.name)  (\(p.count))") { store.source = "app:\(p.name.contains(" ") ? "\"\(p.name)\"" : p.name)" }
+            }
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: "app.dashed")
+                Text(store.source.map { $0.replacingOccurrences(of: "app:", with: "") } ?? "All apps")
+                    .lineLimit(1)
+            }
+            .foregroundStyle(store.source == nil ? Theme.muted : Theme.accent)
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help("Only show requests from one program on this Mac (the iOS Simulator app, a browser, …)")
+    }
+
     private func installCA(_ sim: BootedSimulator) {
         do {
             try Simulators.installCA(udid: sim.id, certPath: store.caPath)
@@ -104,6 +129,7 @@ struct ContentView: View {
                 Text("STATUS").frame(width: 58, alignment: .leading)
                 Text("METHOD").frame(width: 64, alignment: .leading)
                 Text("URL").frame(maxWidth: .infinity, alignment: .leading)
+                Text("APP").frame(width: 110, alignment: .leading)
                 Text("DURATION").frame(width: 120, alignment: .leading)
                 Text("SIZE").frame(width: 70, alignment: .trailing)
             }
@@ -180,6 +206,11 @@ struct TrafficRow: View {
             .lineLimit(1)
             .truncationMode(.middle)
             .frame(maxWidth: .infinity, alignment: .leading)
+            Text(tx.clientProcess ?? "")
+                .font(Theme.monoSmall)
+                .foregroundStyle(Theme.muted)
+                .lineLimit(1)
+                .frame(width: 110, alignment: .leading)
             DurationBar(ms: tx.durationMs).frame(width: 120)
             Text(formatBytes(tx.responseBodySize))
                 .font(Theme.mono)

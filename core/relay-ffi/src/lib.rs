@@ -47,6 +47,7 @@ pub struct FfiTransaction {
     pub url: String,
     pub scheme: String,
     pub host: String,
+    pub port: u16,
     pub path: String,
     pub status: Option<u16>,
     pub state: FfiState,
@@ -62,6 +63,8 @@ pub struct FfiTransaction {
     pub response_body_preview: Option<String>,
     pub client_addr: String,
     pub websocket_messages: Vec<FfiWsMessage>,
+    /// The program on this Mac that made the request, when known.
+    pub client_process: Option<String>,
 }
 
 impl From<Transaction> for FfiTransaction {
@@ -82,6 +85,7 @@ impl From<Transaction> for FfiTransaction {
             method: t.method,
             scheme: t.scheme,
             host: t.host,
+            port: t.port,
             path: t.path,
             status: t.status,
             state: match t.state {
@@ -112,7 +116,78 @@ impl From<Transaction> for FfiTransaction {
                     at_ms: m.at_ms,
                 })
                 .collect(),
+            client_process: t.client_process,
         }
+    }
+}
+
+/// Back to the model type (WebSocket frames are dropped; filters do not look at them).
+impl From<&FfiTransaction> for Transaction {
+    fn from(t: &FfiTransaction) -> Self {
+        let headers = |v: &[FfiHeader]| {
+            v.iter()
+                .map(|h| relay_proxy::Header {
+                    name: h.name.clone(),
+                    value: h.value.clone(),
+                })
+                .collect()
+        };
+        Transaction {
+            id: t.id,
+            started_at_ms: t.started_at_ms,
+            duration_ms: t.duration_ms,
+            method: t.method.clone(),
+            scheme: t.scheme.clone(),
+            host: t.host.clone(),
+            port: t.port,
+            path: t.path.clone(),
+            status: t.status,
+            state: match t.state {
+                FfiState::Complete => TransactionState::Complete,
+                FfiState::Failed => TransactionState::Failed,
+                FfiState::Tunneled => TransactionState::Tunneled,
+                FfiState::InProgress => TransactionState::InProgress,
+            },
+            error: t.error.clone(),
+            decrypted: t.decrypted,
+            http_version: t.http_version.clone(),
+            upstream_http_version: t.upstream_http_version.clone(),
+            request_headers: headers(&t.request_headers),
+            response_headers: headers(&t.response_headers),
+            request_body_size: t.request_body_size,
+            response_body_size: t.response_body_size,
+            request_body_preview: t.request_body_preview.clone(),
+            response_body_preview: t.response_body_preview.clone(),
+            client_addr: t.client_addr.clone(),
+            websocket_messages: vec![],
+            client_process: t.client_process.clone(),
+        }
+    }
+}
+
+/// A parsed search query (`app:AcmeShop host:httpbin.org status:5xx`), for filtering a list in the UI.
+#[derive(uniffi::Object)]
+pub struct TrafficFilter {
+    inner: relay_model::filter::Filter,
+}
+
+#[uniffi::export]
+impl TrafficFilter {
+    /// Fails with a readable message when the query is not valid.
+    #[uniffi::constructor]
+    pub fn parse(query: String) -> Result<Arc<Self>, RelayError> {
+        let inner = relay_model::filter::Filter::parse(&query).map_err(|e| RelayError::Failed {
+            reason: e.to_string(),
+        })?;
+        Ok(Arc::new(Self { inner }))
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
+    pub fn matches(&self, transaction: FfiTransaction) -> bool {
+        self.inner.matches(&Transaction::from(&transaction))
     }
 }
 

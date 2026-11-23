@@ -54,6 +54,83 @@ pub(crate) struct Shared {
     cfg: ProxyConfig,
     /// Hosts that refused Relay's certificate this run; tunneled untouched from then on.
     learned_passthrough: std::sync::Mutex<std::collections::HashSet<String>>,
+    procs: Arc<ProcCache>,
+    listen_port: u16,
+}
+
+/// Client port → program, filled from `lsof` snapshots (see `procinfo`).
+#[derive(Default)]
+struct ProcCache {
+    map: std::sync::Mutex<std::collections::HashMap<u16, String>>,
+    /// Lets one lookup at a time run `lsof`; the others find the result in the cache afterwards.
+    refresh: tokio::sync::Mutex<()>,
+}
+
+impl ProcCache {
+    fn get(&self, port: u16) -> Option<String> {
+        self.map.lock().unwrap().get(&port).cloned()
+    }
+
+    async fn resolve(&self, client_port: u16, relay_port: u16) {
+        if self.get(client_port).is_some() {
+            return;
+        }
+        let _one_at_a_time = self.refresh.lock().await;
+        if self.get(client_port).is_some() {
+            return; // an earlier lookup's snapshot already covered it
+        }
+        let found = tokio::task::spawn_blocking(move || crate::procinfo::snapshot(relay_port))
+            .await
+            .unwrap_or_default();
+        let mut map = self.map.lock().unwrap();
+        if map.len() > 8192 {
+            map.clear(); // ports are reused; stale names must not outlive their connections
+        }
+        map.extend(found);
+    }
+}
+
+/// Fills `client_process` from the cache. If the lookup has not finished when a transaction ends
+/// (it takes a few tens of milliseconds, a fast request can finish first), the finished transaction
+/// is sent again with the name once it is known. Consumers replace a row by its id.
+struct ProcSink {
+    inner: Arc<dyn EventSink>,
+    procs: Arc<ProcCache>,
+    relay_port: u16,
+}
+
+impl EventSink for ProcSink {
+    fn on_transaction(&self, mut t: Transaction) {
+        let loopback_port = (t.client_addr.starts_with("127.0.0.1:")
+            || t.client_addr.starts_with("[::1]:"))
+        .then(|| {
+            t.client_addr
+                .rsplit(':')
+                .next()
+                .and_then(|p| p.parse::<u16>().ok())
+        })
+        .flatten();
+        let Some(port) = loopback_port.filter(|_| t.client_process.is_none()) else {
+            return self.inner.on_transaction(t);
+        };
+        if let Some(name) = self.procs.get(port) {
+            t.client_process = Some(name);
+            return self.inner.on_transaction(t);
+        }
+        let finished = t.state != TransactionState::InProgress;
+        self.inner.on_transaction(t.clone());
+        if finished {
+            let (procs, inner, relay_port) =
+                (self.procs.clone(), self.inner.clone(), self.relay_port);
+            tokio::spawn(async move {
+                procs.resolve(port, relay_port).await;
+                if let Some(name) = procs.get(port) {
+                    t.client_process = Some(name);
+                    inner.on_transaction(t);
+                }
+            });
+        }
+    }
 }
 
 impl Shared {
@@ -147,6 +224,16 @@ pub async fn start(cfg: ProxyConfig, sink: Arc<dyn EventSink>) -> Result<ProxyHa
         .build(http_connector(&cfg));
     let listener = bind_with_fallback(cfg.listen, cfg.port_fallback).await?;
     let local_addr = listener.local_addr()?;
+    let procs: Arc<ProcCache> = Arc::default();
+    let sink: Arc<dyn EventSink> = if cfg.identify_client_process {
+        Arc::new(ProcSink {
+            inner: sink,
+            procs: procs.clone(),
+            relay_port: local_addr.port(),
+        })
+    } else {
+        sink
+    };
     let shared = Arc::new(Shared {
         ca,
         client,
@@ -156,6 +243,8 @@ pub async fn start(cfg: ProxyConfig, sink: Arc<dyn EventSink>) -> Result<ProxyHa
         next_id: AtomicU64::new(1),
         cfg,
         learned_passthrough: Default::default(),
+        procs,
+        listen_port: local_addr.port(),
     });
     let (tx, mut rx) = oneshot::channel();
 
@@ -248,6 +337,11 @@ async fn bind_with_fallback(addr: SocketAddr, fallback: u16) -> Result<TcpListen
 }
 
 async fn serve_client(shared: Arc<Shared>, stream: TcpStream, peer: SocketAddr) {
+    if shared.cfg.identify_client_process && peer.ip().is_loopback() {
+        // In the background: the name is attached when the transaction is recorded.
+        let (procs, port, relay_port) = (shared.procs.clone(), peer.port(), shared.listen_port);
+        tokio::spawn(async move { procs.resolve(port, relay_port).await });
+    }
     let svc = service_fn(move |req| {
         let shared = shared.clone();
         async move { Ok::<_, Infallible>(handle_proxy_request(shared, peer, req).await) }
@@ -1021,6 +1115,7 @@ fn base_transaction(
         response_body_preview: None,
         client_addr: peer.to_string(),
         websocket_messages: vec![],
+        client_process: None,
     }
 }
 

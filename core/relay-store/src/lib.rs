@@ -434,6 +434,7 @@ mod tests {
             response_body_preview: Some(body.into()),
             client_addr: "10.0.0.2:5000".into(),
             websocket_messages: vec![],
+            client_process: None,
         }
     }
 

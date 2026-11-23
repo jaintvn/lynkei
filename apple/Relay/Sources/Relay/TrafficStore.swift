@@ -12,7 +12,12 @@ final class TrafficStore {
     var status: String = "Stopped"
     var errorMessage: String?
     var selection: FfiTransaction.ID?
-    var search: String = ""
+    var search: String = "" { didSet { revision &+= 1 } }
+    /// "Only this device/app" choice, as a search term (`app:AcmeShop`, `client:192.168.0.5`).
+    var source: String? { didSet { revision &+= 1 } }
+    @ObservationIgnored private var revision = 0
+    @ObservationIgnored private var cache: (revision: Int, rows: [FfiTransaction])?
+    @ObservationIgnored private var parsed: (query: String, filter: TrafficFilter?, error: String?)?
 
     private var engine: RelayEngine?
 
@@ -30,10 +35,44 @@ final class TrafficStore {
 
     var isRunning: Bool { port != nil }
 
+    private var query: String {
+        [source, search.trimmingCharacters(in: .whitespaces)].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " ")
+    }
+
+    /// Why the search text is not a valid query, if it is not.
+    var searchError: String? { _ = filter; return parsed?.error }
+
+    private var filter: TrafficFilter? {
+        let q = query
+        if let parsed, parsed.query == q { return parsed.filter }
+        do {
+            let f = try TrafficFilter.parse(query: q)
+            parsed = (q, f.isEmpty() ? nil : f, nil)
+        } catch {
+            parsed = (q, nil, "\(error)")
+        }
+        return parsed?.filter
+    }
+
     var filtered: [FfiTransaction] {
-        let q = search.trimmingCharacters(in: .whitespaces).lowercased()
-        guard !q.isEmpty else { return transactions }
-        return transactions.filter { $0.url.lowercased().contains(q) || $0.method.lowercased() == q }
+        if let cache, cache.revision == revision { return cache.rows }
+        let rows: [FfiTransaction]
+        if let f = filter {
+            rows = transactions.filter { f.matches(transaction: $0) }
+        } else if parsed?.error != nil {
+            rows = []
+        } else {
+            rows = transactions
+        }
+        cache = (revision, rows)
+        return rows
+    }
+
+    /// Programs on this Mac that made requests, with counts, for the Source menu.
+    var processesSeen: [(name: String, count: Int)] {
+        var counts: [String: Int] = [:]
+        for t in transactions { if let p = t.clientProcess { counts[p, default: 0] += 1 } }
+        return counts.map { ($0.key, $0.value) }.sorted { $0.count > $1.count }
     }
 
     var selected: FfiTransaction? {
@@ -78,6 +117,7 @@ final class TrafficStore {
     }
 
     func clear() {
+        revision &+= 1
         transactions.removeAll()
         indexById.removeAll()
         selection = nil
@@ -87,6 +127,7 @@ final class TrafficStore {
     private var indexById: [UInt64: Int] = [:]
 
     private func append(_ tx: FfiTransaction) {
+        revision &+= 1
         if let i = indexById[tx.id], i < transactions.count, transactions[i].id == tx.id {
             transactions[i] = tx
             return

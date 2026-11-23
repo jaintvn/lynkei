@@ -31,3 +31,4 @@ android/relay-android/app/src/main/java/uniffi/
 # iOS demo app build output
 ios/**/build/
 ios/**/DerivedData/
+ios/**/build-device/

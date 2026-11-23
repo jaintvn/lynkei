@@ -20,5 +20,5 @@ targets:
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
         INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
         CODE_SIGN_STYLE: Automatic
-        # For a real iPhone: pick your team in Xcode (Signing & Capabilities), or set it here:
-        # DEVELOPMENT_TEAM: ABCDE12345
+        # Signing team (your Apple ID). Change it to your own team ID if you are not jaintvn.
+        DEVELOPMENT_TEAM: ABRAFHKM9D

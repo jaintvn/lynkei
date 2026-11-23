@@ -146,6 +146,11 @@ pub struct DeviceManager {
     system_proxy: Option<Arc<dyn SystemProxySwitch>>,
     ca_path: PathBuf,
     connected: Mutex<HashMap<String, (u16, u64, Checklist)>>,
+    /// Android devices whose proxy Relay set and has not yet undone (serial → port). Kept on disk so
+    /// a device unplugged while connected is cleaned up the next time Relay sees it, instead of
+    /// being left with a proxy pointing at nothing (no internet).
+    pending_cleanup: Mutex<HashMap<String, u16>>,
+    state_file: Option<PathBuf>,
 }
 
 impl DeviceManager {
@@ -161,17 +166,72 @@ impl DeviceManager {
             system_proxy,
             ca_path: ca_path.to_path_buf(),
             connected: Mutex::new(HashMap::new()),
+            pending_cleanup: Mutex::new(HashMap::new()),
+            state_file: None,
+        }
+    }
+
+    /// Remembers connected Android devices in `path` so they are cleaned up even after a crash,
+    /// a quit, or the device being unplugged.
+    pub fn with_state_file(mut self, path: &Path) -> Self {
+        let loaded: HashMap<String, u16> = std::fs::read_to_string(path)
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_default();
+        *self.pending_cleanup.get_mut().unwrap() = loaded;
+        self.state_file = Some(path.to_path_buf());
+        self
+    }
+
+    fn save_pending(&self) {
+        if let Some(path) = &self.state_file {
+            let map = self.pending_cleanup.lock().unwrap();
+            if let Ok(text) = serde_json::to_string(&*map) {
+                let _ = std::fs::write(path, text);
+            }
+        }
+    }
+
+    /// Undoes the proxy on Android devices left connected by an earlier run (now visible again).
+    fn clean_up_leftovers(&self, devices: &[Device]) {
+        let todo: Vec<(String, u16)> = {
+            let pending = self.pending_cleanup.lock().unwrap();
+            let connected = self.connected.lock().unwrap();
+            devices
+                .iter()
+                .filter(|d| !connected.contains_key(&d.id))
+                .filter_map(|d| pending.get(&d.id).map(|p| (d.id.clone(), *p)))
+                .collect()
+        };
+        for (id, port) in todo {
+            let cleared = self
+                .adb(
+                    &id,
+                    &["shell", "settings", "put", "global", "http_proxy", ":0"],
+                )
+                .map(|o| o.ok)
+                .unwrap_or(false);
+            let _ = self.adb(&id, &["reverse", "--remove", &format!("tcp:{port}")]);
+            if cleared {
+                tracing::info!(device = %id, "removed the proxy Relay left on this device earlier");
+                self.pending_cleanup.lock().unwrap().remove(&id);
+                self.save_pending();
+            }
         }
     }
 
     /// Real commands, auto-detected `adb`.
     pub fn system(system_proxy: Option<Arc<dyn SystemProxySwitch>>, ca_path: &Path) -> Self {
-        Self::new(
+        let mgr = Self::new(
             Arc::new(SystemRunner),
             find_adb().map(|p| p.to_string_lossy().into_owned()),
             system_proxy,
             ca_path,
-        )
+        );
+        match ca_path.parent() {
+            Some(dir) => mgr.with_state_file(&dir.join("android-devices.json")),
+            None => mgr,
+        }
     }
 
     fn adb(&self, serial: &str, args: &[&str]) -> Result<Output> {
@@ -207,6 +267,7 @@ impl DeviceManager {
                 out.push(d);
             }
         }
+        self.clean_up_leftovers(&out);
         let connected = self.connected.lock().unwrap();
         for d in &mut out {
             d.connected = connected.contains_key(&d.id);
@@ -254,11 +315,19 @@ impl DeviceManager {
                 sp.disable()?;
             }
         } else {
-            let _ = self.adb(
-                id,
-                &["shell", "settings", "put", "global", "http_proxy", ":0"],
-            );
+            let cleared = self
+                .adb(
+                    id,
+                    &["shell", "settings", "put", "global", "http_proxy", ":0"],
+                )
+                .map(|o| o.ok)
+                .unwrap_or(false);
             let _ = self.adb(id, &["reverse", "--remove", &format!("tcp:{port}")]);
+            // Unplugged devices stay on the cleanup list until we can really undo their proxy.
+            if cleared {
+                self.pending_cleanup.lock().unwrap().remove(id);
+                self.save_pending();
+            }
         }
         Ok(())
     }
@@ -353,6 +422,13 @@ impl DeviceManager {
             Ok(o) => StepState::Failed(first_line(&format!("{} {}", o.stderr, o.stdout))),
             Err(e) => StepState::Failed(e.to_string()),
         };
+        if matches!(proxy, StepState::Done(_)) {
+            self.pending_cleanup
+                .lock()
+                .unwrap()
+                .insert(d.id.clone(), port);
+            self.save_pending();
+        }
         Checklist { proxy, certificate }
     }
 
@@ -777,6 +853,59 @@ mod tests {
             fake.saw("/apex/com.android.conscrypt/cacerts"),
             "Android 14+ path is overlaid too"
         );
+    }
+
+    #[test]
+    fn a_device_unplugged_while_connected_is_cleaned_up_when_it_comes_back() {
+        let dir = std::env::temp_dir().join(format!("relay-dev-leftover-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let state = dir.join("android-devices.json");
+
+        // Connect, then the cable is pulled: adb can no longer reach the phone.
+        let present = Fake::new(vec![
+            ("devices -l", ok(ADB)),
+            ("subject_hash_old", ok("eadedf90\n")),
+            (
+                " root",
+                fail("adbd cannot run as root in production builds"),
+            ),
+        ]);
+        let m = DeviceManager::new(present, Some("adb".into()), None, Path::new("/tmp/ca.pem"))
+            .with_state_file(&state);
+        m.connect("R5CT123ABC", 8888).unwrap();
+        assert!(
+            std::fs::read_to_string(&state)
+                .unwrap()
+                .contains("R5CT123ABC"),
+            "remembered on disk"
+        );
+        drop(m); // Relay quits / crashes with the phone's proxy still set
+
+        // Next run: nothing connected yet, but the phone is plugged in again.
+        let again = Fake::new(vec![("devices -l", ok(ADB))]);
+        let m2 = DeviceManager::new(
+            again.clone(),
+            Some("adb".into()),
+            None,
+            Path::new("/tmp/ca.pem"),
+        )
+        .with_state_file(&state);
+        assert!(!again.saw("http_proxy :0"));
+        let seen = m2.list();
+        assert!(seen.iter().any(|d| d.id == "R5CT123ABC" && !d.connected));
+        assert!(
+            again.saw("-s R5CT123ABC shell settings put global http_proxy :0"),
+            "leftover proxy removed"
+        );
+        assert!(again.saw("reverse --remove tcp:8888"));
+        assert!(
+            !std::fs::read_to_string(&state)
+                .unwrap()
+                .contains("R5CT123ABC"),
+            "forgotten once cleaned"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

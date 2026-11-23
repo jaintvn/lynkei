@@ -98,12 +98,15 @@ impl Engine {
         let switch: Option<Arc<dyn relay_devices::SystemProxySwitch>> = system_proxy
             .clone()
             .map(|s| s as Arc<dyn relay_devices::SystemProxySwitch>);
-        let devices = Arc::new(relay_devices::DeviceManager::new(
-            devices_runner.clone(),
-            adb,
-            switch,
-            &opts.data_dir.join(relay_proxy::ca::CA_CERT_FILE),
-        ));
+        let devices = Arc::new(
+            relay_devices::DeviceManager::new(
+                devices_runner.clone(),
+                adb,
+                switch,
+                &opts.data_dir.join(relay_proxy::ca::CA_CERT_FILE),
+            )
+            .with_state_file(&opts.data_dir.join("android-devices.json")),
+        );
         Ok(Arc::new(Engine {
             opts,
             store,

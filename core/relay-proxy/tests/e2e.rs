@@ -1062,3 +1062,59 @@ async fn phones_can_open_the_setup_pages_on_the_proxy_port() {
     assert!(get("/ca.pem").await.contains("BEGIN CERTIFICATE"));
     assert!(get("/nope").await.starts_with("HTTP/1.1 404"));
 }
+
+/// An app that refuses Relay's certificate (pinning, or an Android app that ignores user CAs) must
+/// not stay broken: after the first refusal Relay stops intercepting that host.
+#[tokio::test]
+async fn a_host_that_refuses_the_relay_ca_is_passed_through_afterwards() {
+    let (origin_port, origin_ca) = start_https_origin().await;
+    let (proxy, log, _relay_ca) = start_proxy(origin_ca.clone(), &[]).await;
+    let url = format!("https://localhost:{origin_port}/needs-the-real-cert");
+
+    // 1st attempt: the app only trusts the origin's real certificate → it refuses Relay's.
+    assert!(
+        fetch_via_proxy(proxy.local_addr, &url, std::slice::from_ref(&origin_ca))
+            .await
+            .is_err()
+    );
+    // 2nd attempt (the app's retry): Relay now tunnels it, so the REAL certificate reaches the app.
+    let res = fetch_via_proxy(proxy.local_addr, &url, &[origin_ca])
+        .await
+        .expect("the retry must work untouched");
+    assert_eq!(res.status, 200);
+
+    drop(proxy);
+    let txs = wait_for(&log, 2).await;
+    assert_eq!(txs[0].state, TransactionState::Failed);
+    assert!(
+        txs[0]
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("passes this host through"),
+        "{:?}",
+        txs[0].error
+    );
+    assert_eq!(txs[1].state, TransactionState::Tunneled);
+}
+
+#[tokio::test]
+async fn auto_passthrough_can_be_turned_off() {
+    let (origin_port, origin_ca) = start_https_origin().await;
+    let dir = std::env::temp_dir().join(format!("relay-e2e-noauto-{}", rand_suffix()));
+    let mut cfg = ProxyConfig::new("127.0.0.1:0".parse().unwrap(), &dir);
+    cfg.extra_upstream_roots = vec![origin_ca.clone()];
+    cfg.auto_passthrough = false;
+    let proxy = relay_proxy::start(cfg, Arc::new(|_t: Transaction| {}))
+        .await
+        .unwrap();
+    let url = format!("https://localhost:{origin_port}/x");
+    for _ in 0..2 {
+        assert!(
+            fetch_via_proxy(proxy.local_addr, &url, std::slice::from_ref(&origin_ca))
+                .await
+                .is_err(),
+            "still intercepted, so still refused"
+        );
+    }
+}

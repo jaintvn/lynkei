@@ -52,6 +52,32 @@ pub(crate) struct Shared {
     sink: Arc<dyn EventSink>,
     next_id: AtomicU64,
     cfg: ProxyConfig,
+    /// Hosts that refused Relay's certificate this run; tunneled untouched from then on.
+    learned_passthrough: std::sync::Mutex<std::collections::HashSet<String>>,
+}
+
+impl Shared {
+    fn is_passthrough(&self, name: &str) -> bool {
+        self.cfg.is_passthrough(name)
+            || self
+                .learned_passthrough
+                .lock()
+                .unwrap()
+                .contains(&name.trim_end_matches('.').to_ascii_lowercase())
+    }
+}
+
+/// True when the client's handshake error says it rejected our certificate (not a network glitch).
+fn certificate_rejected(err: &str) -> bool {
+    [
+        "CertificateUnknown",
+        "UnknownCA",
+        "BadCertificate",
+        "CertificateExpired",
+        "UnsupportedCertificate",
+    ]
+    .iter()
+    .any(|a| err.contains(a))
 }
 
 /// A running proxy. Dropping it (or calling [`ProxyHandle::shutdown`]) stops accepting connections.
@@ -129,6 +155,7 @@ pub async fn start(cfg: ProxyConfig, sink: Arc<dyn EventSink>) -> Result<ProxyHa
         sink,
         next_id: AtomicU64::new(1),
         cfg,
+        learned_passthrough: Default::default(),
     });
     let (tx, mut rx) = oneshot::channel();
 
@@ -311,7 +338,7 @@ async fn handle_tunnel<S>(
     let is_http = !is_tls && sniff::looks_like_http(&first);
     // Through the VPN `host` is an IP address; the real name comes from SNI.
     let name = sni.clone().unwrap_or_else(|| host.clone());
-    let passthrough = shared.cfg.is_passthrough(&name) || shared.cfg.is_passthrough(&host);
+    let passthrough = shared.is_passthrough(&name) || shared.is_passthrough(&host);
     let client = Prefixed::new(Bytes::from(first), client);
 
     if is_tls && !passthrough {
@@ -413,8 +440,22 @@ where
             );
             t.state = TransactionState::Failed;
             t.duration_ms = started.elapsed().as_millis() as u64;
+            let reason = e.to_string();
+            let learned = shared.cfg.auto_passthrough && certificate_rejected(&reason);
+            if learned {
+                shared
+                    .learned_passthrough
+                    .lock()
+                    .unwrap()
+                    .insert(host.trim_end_matches('.').to_ascii_lowercase());
+            }
             t.error = Some(format!(
-                "TLS handshake with the client failed ({e}). The app may pin certificates or not trust the Relay CA."
+                "TLS handshake with the client failed ({reason}). The app may pin certificates or not trust the Relay CA.{}",
+                if learned {
+                    " Relay passes this host through untouched from now on, so the app keeps working."
+                } else {
+                    ""
+                }
             ));
             shared.sink.on_transaction(t);
             return;

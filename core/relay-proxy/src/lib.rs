@@ -49,6 +49,10 @@ pub struct ProxyConfig {
     /// closed. Some servers (Apple's) only close at their idle timeout, which would leave the
     /// tunnel "open" long after the app left.
     pub tunnel_half_close_grace: Duration,
+    /// When an app refuses Relay's certificate (pinning, or it ignores user-installed CAs, which
+    /// is most Android apps), pass that host through untouched from then on, so the app keeps
+    /// working. The first refused connection still fails; the app's retry then succeeds.
+    pub auto_passthrough: bool,
     /// Extra trusted roots for upstream servers (tests, corporate CAs).
     pub extra_upstream_roots: Vec<CertificateDer<'static>>,
 }
@@ -64,6 +68,7 @@ impl ProxyConfig {
             connect_timeout: Duration::from_secs(10),
             port_fallback: 10,
             tunnel_half_close_grace: Duration::from_secs(5),
+            auto_passthrough: true,
             extra_upstream_roots: vec![],
         }
     }

@@ -435,6 +435,26 @@ pub struct FfiEdit {
     pub body: String,
 }
 
+/// A request to send through Relay (Compose / Repeat).
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiComposeRequest {
+    pub method: String,
+    pub url: String,
+    pub headers: Vec<FfiHeader>,
+    pub body: String,
+}
+
+/// What came back for one composed request. `status` is 0 and `error` set when it never got a response.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiComposeResult {
+    pub status: u16,
+    pub error: Option<String>,
+    pub headers: Vec<FfiHeader>,
+    pub body_preview: Option<String>,
+    pub body_size: u64,
+    pub duration_ms: u64,
+}
+
 fn load_rules(dir: &std::path::Path) -> Option<relay_model::rules::RuleSet> {
     let text = std::fs::read_to_string(dir.join("rules.yaml")).ok()?;
     let set = relay_model::rules::RuleSet::from_yaml(&text).ok()?;
@@ -571,6 +591,87 @@ impl RelayEngine {
             .into_iter()
             .map(|s| s.tx.into())
             .collect())
+    }
+
+    /// Sends `request` through Relay `count` times (1 to 200), one after another or all at once.
+    /// The requests appear in the traffic list like any other, and rules and breakpoints apply.
+    /// Blocks until all have finished: call it off the main thread.
+    pub fn compose(
+        &self,
+        request: FfiComposeRequest,
+        count: u32,
+        parallel: bool,
+    ) -> Result<Vec<FfiComposeResult>, RelayError> {
+        let (addr, pem) = {
+            let guard = self.handle.lock().unwrap();
+            let h = guard.as_ref().ok_or_else(|| RelayError::Failed {
+                reason: "start Relay first".into(),
+            })?;
+            (h.local_addr, h.ca_pem().to_owned())
+        };
+        // Always reach the proxy on loopback, whatever address it listens on.
+        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], addr.port()));
+        let roots: Vec<_> = {
+            use rustls::pki_types::{CertificateDer, pem::PemObject};
+            CertificateDer::pem_slice_iter(pem.as_bytes())
+                .filter_map(Result::ok)
+                .collect()
+        };
+        let spec = relay_proxy::compose::ComposeRequest {
+            method: request.method,
+            url: request.url,
+            headers: request
+                .headers
+                .into_iter()
+                .map(|h| (h.name, h.value))
+                .collect(),
+            body: request.body.into_bytes(),
+        };
+        let count = count.clamp(1, 200) as usize;
+        Ok(self.runtime.block_on(async move {
+            let one = move |spec: relay_proxy::compose::ComposeRequest, roots: Vec<_>| async move {
+                match relay_proxy::compose::send_via_proxy(addr, &roots, &spec).await {
+                    Ok(r) => FfiComposeResult {
+                        status: r.status,
+                        error: None,
+                        headers: r
+                            .headers
+                            .into_iter()
+                            .map(|(name, value)| FfiHeader { name, value })
+                            .collect(),
+                        body_preview: r.body_preview,
+                        body_size: r.body_size,
+                        duration_ms: r.duration_ms,
+                    },
+                    Err(e) => FfiComposeResult {
+                        status: 0,
+                        error: Some(format!("{e:#}")),
+                        headers: vec![],
+                        body_preview: None,
+                        body_size: 0,
+                        duration_ms: 0,
+                    },
+                }
+            };
+            if !parallel {
+                let mut out = Vec::with_capacity(count);
+                for _ in 0..count {
+                    out.push(one(spec.clone(), roots.clone()).await);
+                }
+                return out;
+            }
+            let mut set = tokio::task::JoinSet::new();
+            for i in 0..count {
+                let (s, r) = (spec.clone(), roots.clone());
+                set.spawn(async move { (i, one(s, r).await) });
+            }
+            let mut done = Vec::with_capacity(count);
+            while let Some(Ok(item)) = set.join_next().await {
+                done.push(item);
+            }
+            done.sort_by_key(|(i, _)| *i);
+            done.into_iter().map(|(_, r)| r).collect()
+        }))
     }
 
     /// Everything the filter matches (empty = all stored traffic), as a HAR 1.2 document, oldest first.
@@ -1148,6 +1249,30 @@ mod tests {
             "{out}"
         );
         assert!(engine.import_har("not har".into()).is_err());
+        engine.stop();
+    }
+    #[test]
+    fn compose_needs_a_running_engine_and_rejects_bad_urls() {
+        let dir = std::env::temp_dir().join(format!("relay-ffi-compose-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let engine = RelayEngine::new(dir.to_string_lossy().into()).unwrap();
+        let req = FfiComposeRequest {
+            method: "GET".into(),
+            url: "ftp://nope".into(),
+            headers: vec![],
+            body: String::new(),
+        };
+        assert!(
+            engine.compose(req.clone(), 1, false).is_err(),
+            "not started"
+        );
+        engine
+            .start("127.0.0.1".into(), 0, Box::new(Quiet))
+            .unwrap();
+        let out = engine.compose(req, 3, true).unwrap();
+        assert_eq!(out.len(), 3);
+        assert!(out.iter().all(|r| r.status == 0 && r.error.is_some()));
         engine.stop();
     }
 }

@@ -6,6 +6,7 @@ pub mod body;
 pub mod breakpoints;
 pub mod ca;
 pub mod client;
+pub mod compose;
 pub mod procinfo;
 mod proxy;
 pub mod rules;

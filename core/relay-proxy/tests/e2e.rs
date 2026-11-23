@@ -1463,3 +1463,76 @@ rules:
         (Some(418), vec!["stop-resp".to_string()])
     );
 }
+
+#[tokio::test]
+async fn composed_requests_go_through_the_proxy_and_are_recorded() {
+    use relay_proxy::compose::{ComposeRequest, send_via_proxy};
+    let http_port = start_http_origin().await;
+    let (https_port, origin_ca) = start_https_origin().await;
+    let (proxy, log, relay_ca) = start_proxy(origin_ca, &[]).await;
+
+    // Plain HTTP with a body and a custom header.
+    let res = send_via_proxy(
+        proxy.local_addr,
+        &[],
+        &ComposeRequest {
+            method: "post".into(),
+            url: format!("http://127.0.0.1:{http_port}/cart?x=1"),
+            headers: vec![
+                ("X-Edited".into(), "yes".into()),
+                ("Content-Length".into(), "999".into()), // wrong on purpose: recomputed
+            ],
+            body: br#"{"qty":2}"#.to_vec(),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(res.status, 200);
+    assert!(res.body_preview.as_deref().unwrap().contains("/cart?x=1"));
+
+    // HTTPS, trusting only Relay's CA (proves it was decrypted on the way).
+    let res = send_via_proxy(
+        proxy.local_addr,
+        &[relay_ca],
+        &ComposeRequest {
+            method: "GET".into(),
+            url: format!("https://localhost:{https_port}/v2/items"),
+            headers: vec![],
+            body: vec![],
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(res.status, 200);
+    assert!(
+        res.headers
+            .iter()
+            .any(|(k, v)| k == "x-origin" && v == "test")
+    );
+
+    let txs = wait_for(&log, 2).await;
+    let post = txs.iter().find(|t| t.method == "POST").unwrap();
+    assert_eq!(post.request_body_preview.as_deref(), Some(r#"{"qty":2}"#));
+    assert!(
+        post.request_headers
+            .iter()
+            .any(|h| h.name.eq_ignore_ascii_case("x-edited") && h.value == "yes")
+    );
+    assert!(txs.iter().any(|t| t.scheme == "https" && t.decrypted));
+
+    // A bad URL is an error, not a hang.
+    assert!(
+        send_via_proxy(
+            proxy.local_addr,
+            &[],
+            &ComposeRequest {
+                method: "GET".into(),
+                url: "ftp://x".into(),
+                headers: vec![],
+                body: vec![],
+            },
+        )
+        .await
+        .is_err()
+    );
+}

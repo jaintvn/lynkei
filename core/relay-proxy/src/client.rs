@@ -151,7 +151,7 @@ where
     })
 }
 
-async fn read_head(stream: &mut TcpStream) -> Result<String> {
+pub(crate) async fn read_head(stream: &mut TcpStream) -> Result<String> {
     let mut buf = Vec::new();
     let mut byte = [0u8; 1];
     while !buf.ends_with(b"\r\n\r\n") {

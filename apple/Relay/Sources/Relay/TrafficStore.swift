@@ -199,6 +199,23 @@ final class TrafficStore {
         return added.count
     }
 
+    /// Sends a request through Relay (so it shows in the list), `count` times.
+    func compose(_ request: FfiComposeRequest, count: Int, parallel: Bool) async throws -> [FfiComposeResult] {
+        guard let engine else { throw NSError(domain: "Relay", code: 1, userInfo: [NSLocalizedDescriptionKey: "Start Relay first"]) }
+        return try await Task.detached { try engine.compose(request: request, count: UInt32(count), parallel: parallel) }.value
+    }
+
+    /// Resends a captured request exactly as it was, once.
+    func repeatNow(_ tx: FfiTransaction) {
+        let draft = ComposeDraft(copying: tx)
+        Task {
+            do {
+                let r = try await compose(draft.request, count: 1, parallel: false)
+                if let e = r.first?.error { ruleMessage = "Repeat failed: \(e)" }
+            } catch { ruleMessage = "Repeat failed: \(error)" }
+        }
+    }
+
     func clear() {
         revision &+= 1
         transactions.removeAll()

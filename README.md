@@ -129,6 +129,10 @@ scripts/build-apple.sh && scripts/make-mac-app.sh && open apple/Relay/build/Rela
 
 Click **Connect device**. Relay finds booted iOS Simulators and Android emulators or USB phones and sets each one up (proxy and certificate) with one click. For an iPhone on Wi-Fi, scan the QR code on that screen. From a terminal, `relay devices connect <id>` does the same.
 
+## Compose and Repeat
+
+**Compose** (toolbar) sends a request you write; **Repeat** and **Edit & Repeat…** in a request's right-click menu resend a captured one, optionally edited. You can send it up to 200 times, one by one or all at once, which is handy for retry and race checks. The requests go through Relay, so they show up in the list and your rules and breakpoints apply to them. Only the text of a captured body is copied, so a binary or very large body needs to be pasted in.
+
 ## HAR import and export
 
 The **HAR** menu in the Mac app exports the requests matching your current search (or everything stored) as a HAR 1.2 file, and opens HAR files from Relay, browsers or Charles. Bodies in an export are the text previews Relay keeps, so large or binary bodies are cut or left out.

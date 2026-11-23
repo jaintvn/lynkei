@@ -9,6 +9,7 @@ struct ContentView: View {
     @State private var showConnect = false
     @State private var showRules = false
     @State private var mapLocalFor: FfiTransaction?
+    @State private var composing: ComposeDraft?
 
     var body: some View {
         @Bindable var store = store
@@ -31,6 +32,7 @@ struct ContentView: View {
         .sheet(isPresented: $showConnect) { ConnectView() }
         .sheet(isPresented: $showRules) { RulesView() }
         .sheet(item: $mapLocalFor) { MapLocalView(tx: $0) }
+        .sheet(item: $composing) { ComposeView(draft: $0) }
         .sheet(item: Binding(get: { store.paused.first }, set: { _ in })) { BreakpointView(item: $0).id($0.id) }
     }
 
@@ -67,6 +69,14 @@ struct ContentView: View {
             .frame(maxWidth: 520)
 
             sourceMenu
+
+            Button(action: { composing = ComposeDraft() }) {
+                HStack(spacing: 6) {
+                    Image(systemName: "paperplane")
+                    Text("Compose")
+                }
+            }
+            .buttonStyle(PillButtonStyle())
 
             Button(action: { showRules = true }) {
                 HStack(spacing: 6) {
@@ -217,6 +227,9 @@ struct ContentView: View {
 
     @ViewBuilder
     private func ruleMenu(for tx: FfiTransaction) -> some View {
+        Button("Repeat") { store.repeatNow(tx) }
+        Button("Edit & Repeat…") { composing = ComposeDraft(copying: tx) }
+        Divider()
         Button("Breakpoint on \(tx.host)\(tx.path.split(separator: "?").first.map { String($0) } ?? "")") { store.addQuickRule("breakpoint", for: tx) }
         Button("Block this request") { store.addQuickRule("block", for: tx) }
         Button("Map local to a file…") { mapLocalFor = tx }

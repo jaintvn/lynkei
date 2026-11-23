@@ -218,6 +218,19 @@
           "required": [
             "delay_ms"
           ]
+        },
+        {
+          "description": "Replace the whole body with this text.",
+          "type": "object",
+          "properties": {
+            "set_body": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "set_body"
+          ]
         }
       ]
     },

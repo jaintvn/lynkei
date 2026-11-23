@@ -63,10 +63,44 @@ struct CodeText: NSViewRepresentable {
             parent.text = tv.string
         }
 
+        private static let tokens = try! NSRegularExpression(
+            pattern: "\"(?:[^\"\\\\]|\\\\.)*\"|-?\\d+(?:\\.\\d+)?(?:[eE][+-]?\\d+)?|\\btrue\\b|\\bfalse\\b|\\bnull\\b")
+        private var colouredFor = ""
+
+        /// JSON colours (keys, strings, numbers, literals) for bodies up to a megabyte.
+        private func colorize(_ tv: NSTextView, _ lm: NSLayoutManager, _ full: NSRange) {
+            let s = tv.string
+            let trimmed = s.drop { $0.isWhitespace }
+            guard full.length < 1_000_000, trimmed.first == "{" || trimmed.first == "[" else {
+                lm.removeTemporaryAttribute(.foregroundColor, forCharacterRange: full)
+                colouredFor = ""
+                return
+            }
+            let sig = "\(full.length)|\(s.hashValue)"
+            guard sig != colouredFor else { return }
+            colouredFor = sig
+            lm.removeTemporaryAttribute(.foregroundColor, forCharacterRange: full)
+            let ns = s as NSString
+            for m in Self.tokens.matches(in: s, range: full) {
+                let r = m.range
+                let first = ns.character(at: r.location)
+                var color: NSColor
+                if first == 34 {  // a quote: a key when a colon follows
+                    var j = r.location + r.length
+                    while j < ns.length, [32, 10, 9, 13].contains(ns.character(at: j)) { j += 1 }
+                    color = (j < ns.length && ns.character(at: j) == 58) ? NSColor(Theme.key) : NSColor(Theme.str)
+                } else {
+                    color = NSColor(Theme.num)
+                }
+                lm.addTemporaryAttribute(.foregroundColor, value: color, forCharacterRange: r)
+            }
+        }
+
         func highlight(_ tv: NSTextView) {
             guard let lm = tv.layoutManager else { return }
             let full = NSRange(location: 0, length: (tv.string as NSString).length)
             lm.removeTemporaryAttribute(.backgroundColor, forCharacterRange: full)
+            colorize(tv, lm, full)
             let q = parent.query
             var ranges: [NSRange] = []
             if !q.isEmpty {

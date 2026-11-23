@@ -74,6 +74,17 @@ struct TrafficScreen: View {
 
             toolsGroup
 
+            FocusToggle()
+
+            Button { store.clear() } label: {
+                HStack(spacing: 5) { Image(systemName: "trash").font(.system(size: 11)); Text("Clear") }
+                    .font(.system(size: 12.5, weight: .medium))
+                    .padding(.horizontal, 10).frame(height: 30)
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.line2))
+            }
+            .buttonStyle(.plain).fixedSize()
+            .help("Remove all captured calls from the list")
+
             moreMenu
         }
     }
@@ -120,7 +131,7 @@ struct TrafficScreen: View {
             ForEach(["breakpoint", "rewrite", "map local"], id: \.self) { kind in
                 let rules = store.rules.filter { $0.kind == kind }
                 toolToggle(RuleStyle.group(kind), on: rules.contains(where: \.enabled), dot: kind == "breakpoint" ? Theme.paused : Theme.s2xx,
-                           help: rules.isEmpty ? "No \(kind) rules yet" : "Switch all \(kind) rules on or off") {
+                           help: rules.isEmpty ? "No \(RuleStyle.group(kind)) rules yet" : "Switch all \(RuleStyle.group(kind)) rules on or off") {
                     let anyOn = rules.contains(where: \.enabled)
                     for r in rules { store.setRule(r.id, enabled: !anyOn) }
                 }
@@ -132,7 +143,7 @@ struct TrafficScreen: View {
                     Button(p) { store.setGlobalThrottle(p) }
                 }
             } label: {
-                toolLabel("Throttle", on: store.globalThrottle != nil, dot: Theme.s4xx)
+                toolLabel("Slow network", on: store.globalThrottle != nil, dot: Theme.s4xx)
             }
             .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
         }
@@ -167,8 +178,6 @@ struct TrafficScreen: View {
             Divider()
             Button("Export HAR…") { exportHAR() }
             Button("Import HAR…") { importHAR() }
-            Divider()
-            Button("Clear all") { store.clear() }
         } label: {
             Image(systemName: "ellipsis")
                 .font(.system(size: 13, weight: .semibold))
@@ -178,7 +187,7 @@ struct TrafficScreen: View {
                 .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.line2))
         }
         .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
-        .help("Compose, HAR import and export, clear")
+        .help("Compose a request, import or export HAR")
     }
 
     private func installCA(_ sim: BootedSimulator) {
@@ -359,17 +368,17 @@ struct TrafficScreen: View {
 
     @ViewBuilder
     private func ruleMenu(for tx: FfiTransaction) -> some View {
-        Button("Rewrite this call…") { sheets.rewriting = RewriteDraft(copying: tx) }
+        Button("Modify this call…") { sheets.rewriting = RewriteDraft(copying: tx) }
         Divider()
         Button("Repeat") { store.repeatNow(tx) }
         Button("Edit & Repeat…") { sheets.composing = ComposeDraft(copying: tx) }
         Divider()
-        Button("Breakpoint on \(tx.host)\(tx.path.split(separator: "?").first.map { String($0) } ?? "")") { store.addQuickRule("breakpoint", for: tx) }
+        Button("Pause calls to \(tx.host)\(tx.path.split(separator: "?").first.map { String($0) } ?? "")") { store.addQuickRule("breakpoint", for: tx) }
         Button("Block this request") { store.addQuickRule("block", for: tx) }
-        Button("Map local to a file…") { sheets.mapLocalFor = tx }
+        Button("Mock with a file…") { sheets.mapLocalFor = tx }
         Button("Send \(tx.host) to another address…") { sheets.dnsFor = tx }
         Divider()
-        Button("Throttle to 3G") { store.addQuickRule("throttle-3g", for: tx) }
+        Button("Slow to 3G") { store.addQuickRule("throttle-3g", for: tx) }
         Button("Make it fail (offline)") { store.addQuickRule("offline", for: tx) }
     }
 
@@ -429,10 +438,11 @@ struct TrafficRow: View {
                 .font(.system(size: 12)).foregroundStyle(Theme.muted)
                 .lineLimit(1).truncationMode(.middle)
                 .frame(minWidth: 90, maxWidth: 150, alignment: .leading)
-            Text(Analytics.deviceLabel(tx))
-                .font(.system(size: 12)).foregroundStyle(Theme.muted)
-                .lineLimit(1)
-                .frame(width: 70, alignment: .leading)
+            HStack(spacing: 4) {
+                PlatformIcon(platform: Analytics.platform(ofDevice: Analytics.deviceLabel(tx)), size: 10)
+                Text(Analytics.deviceLabel(tx)).font(.system(size: 12)).foregroundStyle(Theme.muted).lineLimit(1)
+            }
+            .frame(width: 70, alignment: .leading)
             DurationBar(ms: tx.durationMs).frame(width: 104)
             Text(tx.responseBodySize == 0 ? "—" : formatBytes(tx.responseBodySize))
                 .font(.system(size: 11.5, design: .monospaced))
@@ -466,6 +476,7 @@ struct TrafficSidebar: View {
     @Environment(Sheets.self) private var sheets
     @State private var expanded: Set<String> = []
     @State private var seeded = false
+    @State private var query = ""
 
     var body: some View {
         // Redo the counts once a second rather than on every captured call.
@@ -474,6 +485,7 @@ struct TrafficSidebar: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
                     devices
+                    favourites
                     apps
                     domains(hosts)
                     rules
@@ -502,88 +514,127 @@ struct TrafficSidebar: View {
                 let on = ds.isConnected(d)
                 Button { sheets.showConnect = true } label: {
                     HStack(spacing: 9) {
-                        Circle().fill(on ? Theme.s2xx : Theme.s4xx).frame(width: 7, height: 7)
+                        PlatformIcon(platform: d.kind.hasPrefix("ios") ? .ios : .android, size: 14, color: on ? Theme.fg : Theme.muted)
                         VStack(alignment: .leading, spacing: 0) {
                             Text(d.name).font(.system(size: 13, weight: .medium)).lineLimit(1)
                             Text(on ? "\(d.os) · ready" : "\(d.os) · not connected")
                                 .font(.system(size: 11)).foregroundStyle(on ? Theme.muted : Theme.s4xx).lineLimit(1)
                         }
                         Spacer(minLength: 0)
+                        Circle().fill(on ? Theme.s2xx : Theme.s4xx).frame(width: 7, height: 7)
                     }
                     .padding(.horizontal, 8).padding(.vertical, 6)
                     .background(RoundedRectangle(cornerRadius: 7).fill(on ? Theme.selection : .clear))
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+            }
+        }
+    }
+
+    private func appRow(_ name: String, count: Int?) -> some View {
+        let on = store.appFilter == name
+        return HStack(spacing: 9) {
+            Text(String(name.prefix(1)).uppercased())
+                .font(.system(size: 10, weight: .bold)).foregroundStyle(.white)
+                .frame(width: 18, height: 18)
+                .background(RoundedRectangle(cornerRadius: 5).fill(LinearGradient(colors: [Color(hex: 0xFF8A5B), Color(hex: 0xFF5277)], startPoint: .topLeading, endPoint: .bottomTrailing)))
+            Text(name).font(.system(size: 13)).lineLimit(1)
+            Spacer(minLength: 0)
+            if let count { Text("\(count)").font(.system(size: 11, design: .monospaced)).foregroundStyle(Theme.muted) }
+            StarButton(on: store.favApps.contains(name)) { store.toggleFavApp(name) }
+        }
+        .padding(.horizontal, 8).padding(.vertical, 4)
+        .background(RoundedRectangle(cornerRadius: 7).fill(on ? Theme.selection : .clear))
+        .contentShape(Rectangle())
+        .onTapGesture { store.appFilter = on ? nil : name }
+    }
+
+    /// Favourite apps and endpoints, always on top.
+    @ViewBuilder private var favourites: some View {
+        if store.hasFavourites {
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 5) {
+                    Image(systemName: "star.fill").font(.system(size: 9)).foregroundStyle(Theme.s4xx)
+                    SectionLabel("Favourites")
+                }
+                .padding(.leading, 8).padding(.bottom, 6)
+                ForEach(store.favApps.sorted(), id: \.self) { appRow($0, count: nil) }
+                ForEach(store.favEndpoints.sorted(), id: \.self) { key in
+                    HStack(spacing: 6) {
+                        let parts = key.split(separator: " ", maxSplits: 1).map(String.init)
+                        Text(parts.first ?? "").font(.system(size: 10.5, weight: .semibold, design: .monospaced)).foregroundStyle(methodColor(parts.first ?? ""))
+                        Text(parts.count > 1 ? parts[1] : key).font(.system(size: 11.5, design: .monospaced)).foregroundStyle(Theme.muted)
+                            .lineLimit(1).truncationMode(.middle)
+                        Spacer(minLength: 0)
+                        StarButton(on: true) { store.toggleFavEndpoint(key) }
+                    }
+                    .padding(.horizontal, 8).padding(.vertical, 3)
+                }
             }
         }
     }
 
     private var apps: some View {
-        let procs = store.processesSeen.prefix(6)
+        let list = store.processesSeen.sorted { (store.favApps.contains($0.name) ? 0 : 1, -$0.count) < (store.favApps.contains($1.name) ? 0 : 1, -$1.count) }
         return VStack(alignment: .leading, spacing: 2) {
             SectionLabel("Apps").padding(.leading, 8).padding(.bottom, 6)
-            if procs.isEmpty {
+            if list.isEmpty {
                 Text("Apps show up as they make requests").font(.system(size: 12)).foregroundStyle(Theme.faint).padding(.horizontal, 8)
             }
-            ForEach(Array(procs), id: \.name) { p in
-                let on = store.appFilter == p.name
-                Button { store.appFilter = on ? nil : p.name } label: {
-                    HStack(spacing: 9) {
-                        Text(String(p.name.prefix(1)).uppercased())
-                            .font(.system(size: 10, weight: .bold)).foregroundStyle(.white)
-                            .frame(width: 18, height: 18)
-                            .background(RoundedRectangle(cornerRadius: 5).fill(LinearGradient(colors: [Color(hex: 0xFF8A5B), Color(hex: 0xFF5277)], startPoint: .topLeading, endPoint: .bottomTrailing)))
-                        Text(p.name).font(.system(size: 13)).lineLimit(1)
-                        Spacer(minLength: 0)
-                        Text("\(p.count)").font(.system(size: 11, design: .monospaced)).foregroundStyle(Theme.muted)
-                    }
-                    .padding(.horizontal, 8).padding(.vertical, 6)
-                    .background(RoundedRectangle(cornerRadius: 7).fill(on ? Theme.selection : .clear))
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-            }
+            ForEach(Array(list.prefix(8)), id: \.name) { appRow($0.name, count: $0.count) }
         }
     }
 
-    private struct HostRow { let host: String; let count: Int; let paths: [(path: String, color: Color)] }
+    private struct PathRow { let key: String; let method: String; let path: String; let color: Color }
+    private struct HostRow { let host: String; let count: Int; let paths: [PathRow] }
 
     private func hostSummary() -> [HostRow] {
         var byHost: [String: [FfiTransaction]] = [:]
         for t in store.transactions { byHost[t.host, default: []].append(t) }
         let pausedHosts = Set(store.paused.compactMap { URL(string: $0.url)?.host })
         return byHost.map { host, txs in
-            var byPath: [String: (n: Int, worst: Int)] = [:]
+            var byPath: [String: (n: Int, worst: Int, t: FfiTransaction)] = [:]
             for t in txs where t.state != .tunneled {
-                let p = Analytics.foldPath(t.path)
-                var e = byPath[p] ?? (0, 0)
+                let k = Analytics.endpointKey(t)
+                var e = byPath[k] ?? (0, 0, t)
                 e.n += 1
                 let s = t.state == .failed ? 5 : Int(t.status ?? 0) / 100
                 e.worst = max(e.worst, s >= 4 ? s : 2)
-                byPath[p] = e
+                byPath[k] = e
             }
-            let paths = byPath.sorted { $0.value.n > $1.value.n }.prefix(6).map { p, e -> (path: String, color: Color) in
-                (p, e.worst >= 5 ? Theme.s5xx : e.worst == 4 ? Theme.s4xx : (pausedHosts.contains(host) ? Theme.paused : Theme.s2xx))
+            let paths = byPath.sorted { $0.value.n > $1.value.n }.map { k, e in
+                PathRow(key: k, method: e.t.method, path: Analytics.foldPath(e.t.path),
+                        color: e.worst >= 5 ? Theme.s5xx : e.worst == 4 ? Theme.s4xx : (pausedHosts.contains(host) ? Theme.paused : Theme.s2xx))
             }
             return HostRow(host: host, count: txs.count, paths: paths)
         }
         .sorted { $0.count > $1.count }
     }
 
-    private func domains(_ hosts: [HostRow]) -> some View {
-        VStack(alignment: .leading, spacing: 1) {
+    private func domains(_ all: [HostRow]) -> some View {
+        let q = query.trimmingCharacters(in: .whitespaces).lowercased()
+        let hosts = q.isEmpty ? all : all.filter { $0.host.lowercased().contains(q) || $0.paths.contains { $0.path.lowercased().contains(q) } }
+        return VStack(alignment: .leading, spacing: 1) {
             SectionLabel("Domains").padding(.leading, 8).padding(.bottom, 6)
-            if hosts.isEmpty {
-                Text("None yet").font(.system(size: 12)).foregroundStyle(Theme.faint).padding(.horizontal, 8)
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass").font(.system(size: 10)).foregroundStyle(Theme.muted)
+                TextField("Find an endpoint", text: $query).textFieldStyle(.plain).font(.system(size: 12))
             }
-            ForEach(hosts.prefix(12), id: \.host) { h in
-                let open = expanded.contains(h.host)
+            .padding(.horizontal, 8).frame(height: 26)
+            .background(RoundedRectangle(cornerRadius: 7).fill(Theme.raised))
+            .overlay(RoundedRectangle(cornerRadius: 7).stroke(Theme.line))
+            .padding(.bottom, 4)
+            if hosts.isEmpty {
+                Text(all.isEmpty ? "None yet" : "No match").font(.system(size: 12)).foregroundStyle(Theme.faint).padding(.horizontal, 8)
+            }
+            ForEach(hosts.prefix(q.isEmpty ? 12 : 30), id: \.host) { h in
+                let open = !q.isEmpty || expanded.contains(h.host)
                 let active = store.search == "host:\(h.host)"
                 HStack(spacing: 6) {
                     Image(systemName: open ? "chevron.down" : "chevron.right")
                         .font(.system(size: 8.5, weight: .bold)).foregroundStyle(Theme.muted).frame(width: 10)
-                        .onTapGesture { if open { expanded.remove(h.host) } else { expanded.insert(h.host) } }
+                        .onTapGesture { if expanded.contains(h.host) { expanded.remove(h.host) } else { expanded.insert(h.host) } }
                     Text(h.host).font(.system(size: 13, weight: open ? .medium : .regular))
                         .foregroundStyle(open || active ? Theme.fg : Theme.muted).lineLimit(1)
                     Spacer(minLength: 0)
@@ -594,13 +645,16 @@ struct TrafficSidebar: View {
                 .contentShape(Rectangle())
                 .onTapGesture { store.search = active ? "" : "host:\(h.host)" }
                 if open {
-                    ForEach(h.paths, id: \.path) { p in
+                    let shown = h.paths.filter { q.isEmpty || h.host.lowercased().contains(q) || $0.path.lowercased().contains(q) }
+                    ForEach(shown.prefix(q.isEmpty ? 6 : 20), id: \.key) { p in
                         HStack(spacing: 6) {
                             Circle().fill(p.color).frame(width: 5, height: 5)
+                            Text(p.method).font(.system(size: 10, weight: .semibold, design: .monospaced)).foregroundStyle(methodColor(p.method))
                             Text(p.path).font(.system(size: 11.5, design: .monospaced)).foregroundStyle(Theme.muted).lineLimit(1)
                             Spacer(minLength: 0)
+                            StarButton(on: store.favEndpoints.contains(p.key)) { store.toggleFavEndpoint(p.key) }
                         }
-                        .padding(.leading, 26).padding(.trailing, 8).padding(.vertical, 4)
+                        .padding(.leading, 22).padding(.trailing, 4).padding(.vertical, 1)
                     }
                 }
             }
@@ -616,7 +670,7 @@ struct TrafficSidebar: View {
             ForEach(store.rules.prefix(8), id: \.id) { r in
                 HStack(spacing: 8) {
                     VStack(alignment: .leading, spacing: 0) {
-                        Text(RuleStyle.group(r.kind) == "Breakpoints" ? "Breakpoint" : RuleStyle.group(r.kind))
+                        Text(RuleStyle.group(r.kind))
                             .font(.system(size: 12, weight: .medium))
                         Text(r.summary).font(.system(size: 11, design: .monospaced)).foregroundStyle(Theme.muted).lineLimit(1)
                     }

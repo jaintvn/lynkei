@@ -67,6 +67,7 @@ extension View {
     /// The rounded panel the Dashboard and Rules screens use.
     func card(padding: CGFloat = 16) -> some View {
         self.padding(padding)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .background(RoundedRectangle(cornerRadius: 14).fill(Theme.panel))
             .overlay(RoundedRectangle(cornerRadius: 14).stroke(Theme.line))
     }
@@ -166,13 +167,13 @@ enum RuleStyle {
     /// Section title in the Rules list.
     static func group(_ kind: String) -> String {
         switch kind {
-        case "rewrite": return "Rewrite"
-        case "map local": return "Map Local"
-        case "map remote": return "Map Remote"
-        case "breakpoint": return "Breakpoints"
-        case "throttle": return "Throttle"
+        case "rewrite": return "Modify"
+        case "map local": return "Mock"
+        case "map remote": return "Redirect"
+        case "breakpoint": return "Pause"
+        case "throttle": return "Slow network"
         case "block": return "Block"
-        case "dns spoof": return "DNS"
+        case "dns spoof": return "Reroute host"
         default: return kind.capitalized
         }
     }
@@ -230,5 +231,117 @@ struct FlowLayout: Layout {
             maxX = max(maxX, x - spacing)
         }
         return (points, CGSize(width: maxX, height: y + rowH))
+    }
+}
+
+/// iOS (Apple logo), Android (robot head) or Mac icon for a device.
+struct PlatformIcon: View {
+    let platform: Analytics.Platform
+    var size: CGFloat = 13
+    var color: Color = Theme.muted
+
+    var body: some View {
+        switch platform {
+        case .ios: Image(systemName: "apple.logo").font(.system(size: size)).foregroundStyle(color).frame(width: size + 3, height: size + 3)
+        case .mac: Image(systemName: "laptopcomputer").font(.system(size: size)).foregroundStyle(color).frame(width: size + 3, height: size + 3)
+        case .android:
+            AndroidHead().fill(Color(hex: 0x3DDC84), style: FillStyle(eoFill: true))
+                .frame(width: size + 1, height: size - 1).frame(width: size + 3, height: size + 3)
+        }
+    }
+}
+
+/// The Android robot head: a dome with two antennae and two eyes cut out.
+struct AndroidHead: Shape {
+    func path(in r: CGRect) -> Path {
+        var p = Path()
+        let w = r.width, h = r.height
+        let c = CGPoint(x: r.midX, y: r.minY + h * 0.95)
+        let rad = min(w * 0.5, h * 0.8)
+        p.move(to: CGPoint(x: c.x - rad, y: c.y))
+        p.addArc(center: c, radius: rad, startAngle: .degrees(180), endAngle: .degrees(0), clockwise: false)
+        p.closeSubpath()
+        let eye = rad * 0.16
+        p.addEllipse(in: CGRect(x: c.x - rad * 0.5 - eye, y: c.y - rad * 0.45 - eye, width: eye * 2, height: eye * 2))
+        p.addEllipse(in: CGRect(x: c.x + rad * 0.5 - eye, y: c.y - rad * 0.45 - eye, width: eye * 2, height: eye * 2))
+        var a = Path()
+        a.move(to: CGPoint(x: c.x - rad * 0.55, y: c.y - rad * 0.8)); a.addLine(to: CGPoint(x: c.x - rad * 0.8, y: r.minY))
+        a.move(to: CGPoint(x: c.x + rad * 0.55, y: c.y - rad * 0.8)); a.addLine(to: CGPoint(x: c.x + rad * 0.8, y: r.minY))
+        p.addPath(a.strokedPath(StrokeStyle(lineWidth: max(1, w * 0.07), lineCap: .round)))
+        return p
+    }
+}
+
+/// Switches focus mode (only favourites) on and off; shown once something is a favourite.
+struct FocusToggle: View {
+    @Environment(TrafficStore.self) private var store
+    var body: some View {
+        if store.hasFavourites {
+            Button { store.focusMode.toggle() } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: store.focusMode ? "star.fill" : "star").font(.system(size: 11))
+                        .foregroundStyle(store.focusMode ? Theme.s4xx : Theme.muted)
+                    Text("Focus").font(.system(size: 12.5, weight: .medium))
+                    Text("\(store.favApps.count + store.favEndpoints.count)")
+                        .font(.system(size: 11, design: .monospaced)).foregroundStyle(Theme.muted)
+                }
+                .padding(.horizontal, 10).frame(height: 30)
+                .background(RoundedRectangle(cornerRadius: 8).fill(store.focusMode ? Theme.selection : .clear))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(store.focusMode ? Theme.accent : Theme.line2))
+            }
+            .buttonStyle(.plain)
+            .fixedSize()
+            .help(store.focusMode ? "Showing only your favourite apps and endpoints. Click to show everything." : "Showing everything. Click to show only favourites.")
+        }
+    }
+}
+
+/// The star that marks a favourite.
+struct StarButton: View {
+    let on: Bool
+    let action: () -> Void
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: on ? "star.fill" : "star").font(.system(size: 11))
+                .foregroundStyle(on ? Theme.s4xx : Theme.faint)
+                .frame(width: 20, height: 20).contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(on ? "Remove from favourites" : "Add to favourites")
+    }
+}
+
+/// Lays children side by side in columns of equal unit width (`spans` units each), all as tall as the tallest.
+struct EqualColumns: Layout {
+    var spans: [Int]
+    var spacing: CGFloat = 12
+
+    private func unit(_ width: CGFloat) -> CGFloat {
+        let total = CGFloat(spans.reduce(0, +))
+        let gaps = spacing * CGFloat(max(spans.count - 1, 0))
+        return (width - gaps) / max(total, 1)
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let w = proposal.width ?? 800
+        let u = unit(w)
+        var h: CGFloat = 0
+        for (i, s) in subviews.enumerated() {
+            let sp = CGFloat(i < spans.count ? spans[i] : 1)
+            h = max(h, s.sizeThatFits(ProposedViewSize(width: u * sp + spacing * (sp - 1), height: nil)).height)
+        }
+        return CGSize(width: w, height: h)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let u = unit(bounds.width)
+        let h = sizeThatFits(proposal: ProposedViewSize(width: bounds.width, height: nil), subviews: subviews, cache: &cache).height
+        var x = bounds.minX
+        for (i, s) in subviews.enumerated() {
+            let sp = CGFloat(i < spans.count ? spans[i] : 1)
+            let w = u * sp + spacing * (sp - 1)
+            s.place(at: CGPoint(x: x, y: bounds.minY), anchor: .topLeading, proposal: ProposedViewSize(width: w, height: h))
+            x += w + spacing
+        }
     }
 }

@@ -7,6 +7,7 @@ struct EndpointsView: View {
     @Binding var screen: Screen
     @State private var sort = "Most failing"
     @State private var version: String?
+    @State private var query = ""
 
     private let sorts = ["Most failing", "Slowest", "Most called", "Largest"]
     private let cols: [CGFloat] = [70, 80, 120, 80, 80, 90, 100, 150]
@@ -16,6 +17,8 @@ struct EndpointsView: View {
             AppHeader(screen: $screen) { Spacer(minLength: 0) }
             TimelineView(.periodic(from: .now, by: 1)) { _ in
                 let all = Analytics.endpoints(store.transactions).filter { s in
+                    let q = query.trimmingCharacters(in: .whitespaces).lowercased()
+                    if !q.isEmpty, !"\(s.method) \(s.path) \(s.host)".lowercased().contains(q) { return false }
                     guard let v = version else { return true }
                     return s.path.hasPrefix("/\(v)/") || s.path == "/\(v)"
                 }
@@ -32,7 +35,13 @@ struct EndpointsView: View {
         }
     }
 
+    /// Favourites first, then the chosen order.
     private func sorted(_ list: [EndpointStat]) -> [EndpointStat] {
+        let ordered = order(list)
+        return ordered.filter { store.favEndpoints.contains($0.key) } + ordered.filter { !store.favEndpoints.contains($0.key) }
+    }
+
+    private func order(_ list: [EndpointStat]) -> [EndpointStat] {
         switch sort {
         case "Slowest": return list.sorted { $0.p95 > $1.p95 }
         case "Most called": return list.sorted { $0.calls > $1.calls }
@@ -50,6 +59,16 @@ struct EndpointsView: View {
                     .foregroundStyle(Theme.muted)
             }
             Spacer()
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass").font(.system(size: 12)).foregroundStyle(Theme.muted)
+                TextField("Search endpoints", text: $query).textFieldStyle(.plain).font(.system(size: 12, design: .monospaced))
+                if !query.isEmpty {
+                    Button { query = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(Theme.faint) }.buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 10).frame(width: 220, height: 30)
+            .background(RoundedRectangle(cornerRadius: 8).fill(Theme.raised))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.line2))
             PillGroup(items: sorts, title: { $0 }, selection: $sort)
             Menu {
                 Button("All versions") { version = nil }
@@ -59,6 +78,14 @@ struct EndpointsView: View {
                 DashedChip(label: "API version: \(version ?? "all")", chevron: false).frame(height: 30)
             }
             .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+            Button { store.clear() } label: {
+                HStack(spacing: 5) { Image(systemName: "trash").font(.system(size: 11)); Text("Clear") }
+                    .font(.system(size: 12.5, weight: .medium))
+                    .padding(.horizontal, 10).frame(height: 30)
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.line2))
+            }
+            .buttonStyle(.plain).fixedSize()
+            .help("Remove all captured calls")
         }
     }
 
@@ -68,6 +95,7 @@ struct EndpointsView: View {
             do {
                 VStack(spacing: 0) {
                     row {
+                        Color.clear.frame(width: 20)
                         Text("METHOD").frame(width: 70, alignment: .leading)
                         Text("ENDPOINT").frame(minWidth: 240, maxWidth: .infinity, alignment: .leading)
                         Text("CALLS").frame(width: 80, alignment: .trailing)
@@ -86,6 +114,7 @@ struct EndpointsView: View {
                     ForEach(rows) { e in
                         let ec = e.errorRate >= 0.5 ? Theme.s5xx : e.errors > 0 ? Theme.s4xx : Theme.s2xx
                         row {
+                            StarButton(on: store.favEndpoints.contains(e.key)) { store.toggleFavEndpoint(e.key) }
                             Text(e.method).font(.system(size: 11.5, weight: .semibold, design: .monospaced)).foregroundStyle(methodColor(e.method)).frame(width: 70, alignment: .leading)
                             VStack(alignment: .leading, spacing: 1) {
                                 Text(e.path).font(.system(size: 12.5, design: .monospaced)).lineLimit(1)

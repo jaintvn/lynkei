@@ -70,7 +70,7 @@ final class IslandController {
     var focusDevice: String?
     /// The device named in the compact island: the chosen one, else the one that sent the newest call.
     var focusedDevice: String {
-        focusDevice ?? store.transactions.last.map(Analytics.deviceLabel) ?? "Relay"
+        focusDevice ?? store.islandRows.last.map(Analytics.deviceLabel) ?? "Relay"
     }
 
     init(store: TrafficStore) {
@@ -124,7 +124,7 @@ final class IslandController {
     /// Looks at the newest calls for things worth a pulse: pinning, and a burst of failures.
     private func scanForAlerts() {
         if let a = alert, a.until < Date() { alert = nil }
-        let tail = store.transactions.suffix(60)
+        let tail = store.islandRows.suffix(60)
         for t in tail where t.state == .failed {
             guard let err = t.error, err.contains("may pin certificates"), !pinningNotified.contains(t.host) else { continue }
             pinningNotified.insert(t.host)
@@ -192,7 +192,7 @@ final class IslandController {
         }
     }
 
-    var recentFailures: Int { store.transactions.filter(isFailure).count }
+    var recentFailures: Int { store.islandRows.filter(isFailure).count }
     var unseenFailures: Int { max(0, recentFailures - failuresSeen) }
 
     private func isFailure(_ t: FfiTransaction) -> Bool { t.state == .failed || (t.status ?? 0) >= 500 }
@@ -201,7 +201,7 @@ final class IslandController {
     func calls(inLast seconds: Double) -> Int {
         let cutoff = UInt64(max(0, (Date().timeIntervalSince1970 - seconds) * 1000))
         var n = 0
-        for t in store.transactions.reversed() {
+        for t in store.islandRows.reversed() {
             if t.startedAtMs < cutoff { break }
             n += 1
         }
@@ -333,8 +333,7 @@ struct IslandCompact: View {
             let device = island.focusedDevice
             HStack(spacing: 0) {
                 HStack(spacing: 6) {
-                    Image(systemName: device.lowercased().contains("pixel") || device.lowercased().contains("android") ? "smartphone" : "iphone")
-                        .font(.system(size: 11)).foregroundStyle(held > 0 ? Theme.paused : Theme.s2xx)
+                    PlatformIcon(platform: Analytics.platform(ofDevice: device), size: 11, color: held > 0 ? Theme.paused : Theme.s2xx)
                     Text(device).font(.system(size: 12, weight: .semibold)).foregroundStyle(.white).lineLimit(1)
                 }
                 .frame(width: IslandController.earWidth - 14, alignment: .leading)
@@ -383,7 +382,7 @@ struct IslandExpanded: View {
     private var deviceNames: [String] {
         let ds = store.deviceStore()
         var names = ds.devices.filter { ds.isConnected($0) }.map(\.name)
-        for t in store.transactions.suffix(200) { let n = Analytics.deviceLabel(t); if !names.contains(n) { names.append(n) } }
+        for t in store.islandRows.suffix(200) { let n = Analytics.deviceLabel(t); if !names.contains(n) { names.append(n) } }
         return Array(names.prefix(3))
     }
 
@@ -396,10 +395,10 @@ struct IslandExpanded: View {
             }
             ForEach(names, id: \.self) { n in
                 let on = island.focusedDevice == n
-                let rate = store.transactions.suffix(300).filter { Analytics.deviceLabel($0) == n && Double($0.startedAtMs) > (Date().timeIntervalSince1970 - 5) * 1000 }.count / 5
+                let rate = store.islandRows.suffix(300).filter { Analytics.deviceLabel($0) == n && Double($0.startedAtMs) > (Date().timeIntervalSince1970 - 5) * 1000 }.count / 5
                 Button { island.focusDevice = n } label: {
                     HStack(spacing: 7) {
-                        Circle().fill(Color(hex: 0x3DD68C)).frame(width: 6, height: 6)
+                        PlatformIcon(platform: Analytics.platform(ofDevice: n), size: 11, color: .white)
                         Text(n).font(.system(size: 12, weight: .semibold)).lineLimit(1)
                         Spacer(minLength: 0)
                         Text("\(rate)/s").font(.system(size: 11, design: .monospaced)).foregroundStyle(.white.opacity(0.62))
@@ -416,7 +415,7 @@ struct IslandExpanded: View {
 
     private var calls: some View {
         let device = island.focusDevice
-        let rows = store.transactions.reversed().lazy.filter { device == nil || Analytics.deviceLabel($0) == device }.prefix(5)
+        let rows = store.islandRows.reversed().lazy.filter { device == nil || Analytics.deviceLabel($0) == device }.prefix(5)
         return VStack(spacing: 2) {
             if rows.isEmpty {
                 Text("No calls yet").font(.system(size: 12)).foregroundStyle(.white.opacity(0.62)).frame(height: 26)
@@ -472,10 +471,10 @@ struct IslandExpanded: View {
         let items: [(String, Bool, Color, () -> Void)] = [
             ("Proxy", store.isRunning, Color(hex: 0x7C8CFF), { store.isRunning ? store.stop() : store.start() }),
             ("SSL", store.decrypt, Color(hex: 0x3DD68C), { store.setDecrypt(!store.decrypt) }),
-            ("Breakpoints", rulesOn("breakpoint"), Color(hex: 0xFF9F43), { flip("breakpoint") }),
-            ("Rewrite", rulesOn("rewrite"), Color(hex: 0x3DD68C), { flip("rewrite") }),
-            ("Map Local", rulesOn("map local"), Color(hex: 0x3DD68C), { flip("map local") }),
-            ("Throttle", store.globalThrottle != nil, Color(hex: 0x3DD68C), { store.setGlobalThrottle(store.globalThrottle == nil ? "3g" : nil) }),
+            ("Pause", rulesOn("breakpoint"), Color(hex: 0xFF9F43), { flip("breakpoint") }),
+            ("Modify", rulesOn("rewrite"), Color(hex: 0x3DD68C), { flip("rewrite") }),
+            ("Mock", rulesOn("map local"), Color(hex: 0x3DD68C), { flip("map local") }),
+            ("Slow network", store.globalThrottle != nil, Color(hex: 0x3DD68C), { store.setGlobalThrottle(store.globalThrottle == nil ? "3g" : nil) }),
         ]
         return LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: 3), spacing: 6) {
             ForEach(items, id: \.0) { label, on, dot, action in
@@ -574,7 +573,7 @@ struct RelayMenuBar: View {
         .pickerStyle(.inline)
         Divider()
         Toggle("Decrypt HTTPS", isOn: Binding(get: { store.decrypt }, set: { store.setDecrypt($0) }))
-        Picker("Throttle everything", selection: Binding(get: { store.globalThrottle ?? "" }, set: { store.setGlobalThrottle($0.isEmpty ? nil : $0) })) {
+        Picker("Slow the whole network", selection: Binding(get: { store.globalThrottle ?? "" }, set: { store.setGlobalThrottle($0.isEmpty ? nil : $0) })) {
             Text("Off").tag("")
             ForEach(store.throttlePresets, id: \.self) { Text($0 == "offline" ? "Offline" : $0.uppercased()).tag($0) }
         }

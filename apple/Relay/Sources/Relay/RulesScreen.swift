@@ -111,7 +111,7 @@ struct RulesScreen: View {
     private var kindTray: some View {
         PillGroup(
             items: ["rewrite", "map local", "map remote", "breakpoint", "block", "throttle"],
-            title: { $0 == "breakpoint" ? "Breakpoint" : RuleStyle.group($0) },
+            title: { RuleStyle.group($0) },
             selection: .constant(draft != nil ? "rewrite" : (rule?.kind ?? "rewrite")))
             .allowsHitTesting(false)
             .fixedSize()
@@ -389,7 +389,7 @@ struct RulesScreen: View {
 
     private func newRule() {
         var d = RewriteDraft()
-        d.name = "New rewrite"
+        d.name = "New modify rule"
         d.sides = [RewriteDraft.Side(phase: "response")]
         selected = nil
         error = nil
@@ -401,7 +401,7 @@ struct RulesScreen: View {
         guard !side.steps.isEmpty else { error = "Add at least one change."; return }
         let name = d.name.trimmingCharacters(in: .whitespaces)
         let rule = FfiRewriteRule(
-            id: asCopy ? "" : side.ruleId, name: (name.isEmpty ? "Rewrite \(d.host)\(d.path)" : name) + (asCopy ? " copy" : ""),
+            id: asCopy ? "" : side.ruleId, name: (name.isEmpty ? "Modify \(d.host)\(d.path)" : name) + (asCopy ? " copy" : ""),
             enabled: true, method: d.method, host: d.host, path: d.path, phase: side.phase, steps: side.steps.map(\.ffi))
         do {
             let id = try store.saveRewrite(rule)

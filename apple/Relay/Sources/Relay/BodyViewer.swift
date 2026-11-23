@@ -34,7 +34,7 @@ private let truncationMarker = "\n…[truncated]"
         guard let text else { return nil }
         if let m = Self.memo, m.source.utf8.count == text.utf8.count, m.source == text { return (m.text, m.json) }
         let doc = JSONDoc(text: text)
-        let shown = doc?.pretty ?? text
+        let shown = doc != nil ? JSONFormat.pretty(text) : text
         Self.memo = (text, shown, doc != nil)
         return (shown, doc != nil)
     }
@@ -246,7 +246,7 @@ struct BodySheet: View {
     }
 
     private func format() {
-        if let doc = JSONDoc(text: text) { text = doc.pretty }
+        if JSONDoc(text: text) != nil { text = JSONFormat.pretty(text) }
     }
 
     // MARK: Footer
@@ -263,9 +263,9 @@ struct BodySheet: View {
             }
             Spacer()
             Button("Revert") { text = original }.disabled(!changed)
-            Button("Keep as a rewrite rule…") { startRule() }
+            Button("Keep as a modify rule…") { startRule() }
                 .buttonStyle(.borderedProminent).disabled(!changed)
-                .help("Opens the Rewrite editor with these changes, so they apply every time this call is made")
+                .help("Opens the Modify editor with these changes, so they apply every time this call is made")
         }
     }
 

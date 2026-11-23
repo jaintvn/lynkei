@@ -11,6 +11,7 @@ struct DashboardView: View {
         VStack(spacing: 0) {
             AppHeader(screen: $screen) {
                 Spacer(minLength: 0)
+                FocusToggle()
                 deviceChips
             }
             TimelineView(.periodic(from: .now, by: 1)) { _ in
@@ -19,14 +20,14 @@ struct DashboardView: View {
                     VStack(alignment: .leading, spacing: 16) {
                         title(m)
                         kpis(m)
-                        HStack(alignment: .top, spacing: 12) {
+                        EqualColumns(spans: [1, 1, 1]) {
                             failing(m)
                             slowest(m)
                             activeRules
                         }
-                        HStack(alignment: .top, spacing: 12) {
+                        EqualColumns(spans: [1, 2]) {
                             topHosts(m)
-                            live(m).frame(maxWidth: .infinity)
+                            live(m)
                         }
                     }
                     .padding(.horizontal, 24).padding(.top, 22).padding(.bottom, 28)
@@ -82,8 +83,13 @@ struct DashboardView: View {
     private func chip(_ label: String, on: Bool, live: Bool = false, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             HStack(spacing: 7) {
-                Circle().fill(Theme.s2xx).frame(width: 7, height: 7)
-                    .shadow(color: live ? Theme.s2xx.opacity(0.8) : .clear, radius: 4)
+                if label == "All devices" || label == "Connect device…" {
+                    Circle().fill(Theme.s2xx).frame(width: 7, height: 7)
+                } else {
+                    PlatformIcon(platform: Analytics.platform(ofDevice: label), size: 12, color: Theme.fg)
+                    Circle().fill(Theme.s2xx).frame(width: 6, height: 6)
+                        .shadow(color: live ? Theme.s2xx.opacity(0.8) : .clear, radius: 4)
+                }
                 Text(label).font(.system(size: 12.5, weight: on ? .medium : .regular))
             }
             .padding(.horizontal, 11).frame(height: 30)
@@ -119,7 +125,7 @@ struct DashboardView: View {
     }
 
     private func kpis(_ m: Metrics) -> some View {
-        HStack(spacing: 12) {
+        EqualColumns(spans: [1, 1, 1, 1]) {
             kpi("Requests / sec", String(format: "%.1f", m.rps), m.rpsDelta, Theme.muted, Theme.accent, m.rpsSpark)
             kpi("Error rate", String(format: "%.1f%%", m.errorRate * 100), m.errorDelta, m.errorRate > 0.01 ? Theme.s5xx : Theme.muted,
                 m.errorRate > 0.01 ? Theme.s5xx : Theme.s2xx, m.errSpark)
@@ -138,7 +144,7 @@ struct DashboardView: View {
             Sparkline(values: spark, color: color, lineWidth: 2).frame(height: 40)
         }
         .card()
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     private func failing(_ m: Metrics) -> some View {
@@ -168,7 +174,7 @@ struct DashboardView: View {
                 .overlay(alignment: .top) { Rectangle().fill(Theme.line).frame(height: 1) }
             }
         }
-        .card().frame(maxWidth: .infinity, alignment: .topLeading)
+        .card().frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     private func slowest(_ m: Metrics) -> some View {
@@ -191,7 +197,7 @@ struct DashboardView: View {
                 .padding(.vertical, 6)
             }
         }
-        .card().frame(maxWidth: .infinity, alignment: .topLeading)
+        .card().frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     private var activeRules: some View {
@@ -203,7 +209,7 @@ struct DashboardView: View {
                 HStack(spacing: 10) {
                     RuleLetter(kind: r.kind, size: 22)
                     VStack(alignment: .leading, spacing: 1) {
-                        Text(RuleStyle.group(r.kind) == "Breakpoints" ? "Breakpoint" : RuleStyle.group(r.kind)).font(.system(size: 13, weight: .medium))
+                        Text(RuleStyle.group(r.kind)).font(.system(size: 13, weight: .medium))
                         Text(r.detail.isEmpty ? r.summary : r.detail).font(.system(size: 11.5, design: .monospaced)).foregroundStyle(Theme.muted).lineLimit(1)
                     }
                     Spacer(minLength: 0)
@@ -215,7 +221,7 @@ struct DashboardView: View {
                 .overlay(alignment: .top) { Rectangle().fill(Theme.line).frame(height: 1) }
             }
         }
-        .card().frame(maxWidth: .infinity, alignment: .topLeading)
+        .card().frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     private func topHosts(_ m: Metrics) -> some View {
@@ -232,7 +238,7 @@ struct DashboardView: View {
                 }
             }
         }
-        .card().frame(width: 460, alignment: .topLeading)
+        .card().frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     private func live(_ m: Metrics) -> some View {
@@ -258,7 +264,7 @@ struct DashboardView: View {
                 .overlay(alignment: .top) { Rectangle().fill(Theme.line).frame(height: 1) }
             }
         }
-        .card()
+        .card().frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     private static func clock(_ ms: UInt64) -> String {

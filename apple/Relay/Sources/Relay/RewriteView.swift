@@ -110,7 +110,7 @@ struct RewriteDraft: Identifiable {
         method = tx.method
         host = tx.host
         path = tx.path.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? "/"
-        name = "Rewrite \(tx.host)\(path)"
+        name = "Modify \(tx.host)\(path)"
         sides = [Side(phase: "request"), Side(phase: "response")]
         requestHeaders = tx.requestHeaders
         responseHeaders = tx.responseHeaders
@@ -131,7 +131,7 @@ struct RewriteDraft: Identifiable {
     }
 }
 
-/// Rewrite (like Charles): pick a call, say what to change in its request or response, keep it as a
+/// Modify: pick a call, say what to change in its request or response, keep it as a
 /// rule that can be switched on and off and edited later.
 struct RewriteView: View {
     @Environment(TrafficStore.self) private var store
@@ -149,7 +149,7 @@ struct RewriteView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text(draft.isNew ? "Rewrite" : "Edit rewrite").font(.system(size: 16, weight: .semibold))
+            Text(draft.isNew ? "Modify this call" : "Edit modify rule").font(.system(size: 16, weight: .semibold))
             TextField("Rule name", text: $draft.name).textFieldStyle(.roundedBorder)
             matchRow
             if draft.sides.count > 1 {
@@ -274,7 +274,7 @@ struct RewriteView: View {
                 let suffix = draft.sides.count > 1 && used.count > 1 ? " (\(s.phase))" : ""
                 let name = draft.name.trimmingCharacters(in: .whitespaces)
                 let rule = FfiRewriteRule(
-                    id: s.ruleId, name: (name.isEmpty ? "Rewrite \(draft.host)\(draft.path)" : name) + suffix,
+                    id: s.ruleId, name: (name.isEmpty ? "Modify \(draft.host)\(draft.path)" : name) + suffix,
                     enabled: draft.enabled, method: draft.method, host: draft.host, path: draft.path,
                     phase: s.phase, steps: s.steps.map(\.ffi))
                 _ = try store.saveRewrite(rule)

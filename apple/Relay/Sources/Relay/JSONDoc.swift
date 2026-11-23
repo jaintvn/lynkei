@@ -29,10 +29,10 @@ struct JSONDoc {
         root = obj
     }
 
-    /// Indented JSON with sorted keys (key order is not preserved by Foundation).
+    /// Indented JSON, `"key": value` (keys sorted, as Foundation does not keep their order).
     var pretty: String {
-        guard let d = try? JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes, .fragmentsAllowed]) else { return "" }
-        return String(data: d, encoding: .utf8) ?? ""
+        guard let d = try? JSONSerialization.data(withJSONObject: root, options: [.sortedKeys, .withoutEscapingSlashes, .fragmentsAllowed]) else { return "" }
+        return JSONFormat.pretty(String(data: d, encoding: .utf8) ?? "")
     }
 
     static func fragment(_ v: Any) -> String {

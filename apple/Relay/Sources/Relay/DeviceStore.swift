@@ -43,6 +43,7 @@ final class DeviceStore {
         scanning = true
         let (list, url) = await Task.detached(priority: .utility) { (engine.listDevices(), engine.wifiSetupUrl()) }.value
         devices = list
+        Analytics.devicePlatforms = Dictionary(list.map { ($0.name, $0.kind.hasPrefix("ios") ? Analytics.Platform.ios : .android) }, uniquingKeysWith: { a, _ in a })
         Analytics.androidDevice = list.first { $0.kind.hasPrefix("android") && ($0.connected || results[$0.id] != nil) }?.name
         wifiURL = url
         // A screen opened later (or after a restart of the sheet) still shows the checklist.

@@ -265,10 +265,8 @@ private struct BreakpointEditor: View {
     }
 
     private func reformat(pretty: Bool) {
-        guard let obj = try? JSONSerialization.jsonObject(with: Data(bodyText.utf8), options: [.fragmentsAllowed]),
-              let data = try? JSONSerialization.data(withJSONObject: obj, options: pretty ? [.prettyPrinted, .withoutEscapingSlashes] : [.withoutEscapingSlashes]),
-              let text = String(data: data, encoding: .utf8) else { return }
-        bodyText = text
+        guard jsonValid == true else { return }
+        bodyText = pretty ? JSONFormat.pretty(bodyText) : JSONFormat.minify(bodyText)
     }
 
     private func send() {

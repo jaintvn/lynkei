@@ -54,15 +54,15 @@ struct InspectorView: View {
                 Button { store.addQuickRule("breakpoint", for: tx) } label: {
                     HStack(spacing: 6) {
                         Image(systemName: "pause.circle").font(.system(size: 12, weight: .semibold))
-                        Text("Breakpoint")
+                        Text("Pause")
                         Text("⌘B").opacity(0.7).fontWeight(.medium)
                     }
                 }
                 .buttonStyle(AccentButtonStyle())
                 .keyboardShortcut("b", modifiers: .command)
-                .help("Pause the next call like this one so you can edit it")
-                small("Map Local") { sheets.mapLocalFor = tx }
-                small("Rewrite") { sheets.rewriting = RewriteDraft(copying: tx) }
+                .help("Hold the next call like this one so you can look at it and change it")
+                small("Mock") { sheets.mapLocalFor = tx }
+                small("Modify") { sheets.rewriting = RewriteDraft(copying: tx) }
                 small("Repeat") { store.repeatNow(tx) }
                 small("Copy cURL") { copy(curl(tx)) }
             }

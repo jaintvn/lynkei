@@ -25,6 +25,24 @@ final class TrafficStore {
     /// "Only this app / this device" (names as shown in the app, see `Analytics.appName`).
     var appFilter: String? { didSet { revision &+= 1 } }
     var deviceFilter: String? { didSet { revision &+= 1 } }
+    /// Favourite apps and endpoints (kept between launches). With any set and Focus on, only they are shown.
+    var favApps: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "favApps") ?? []) {
+        didSet { UserDefaults.standard.set(Array(favApps), forKey: "favApps"); revision &+= 1 }
+    }
+    var favEndpoints: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "favEndpoints") ?? []) {
+        didSet { UserDefaults.standard.set(Array(favEndpoints), forKey: "favEndpoints"); revision &+= 1 }
+    }
+    var focusMode = true { didSet { revision &+= 1 } }
+    var hasFavourites: Bool { !favApps.isEmpty || !favEndpoints.isEmpty }
+    func isFavourite(_ t: FfiTransaction) -> Bool {
+        favApps.contains(Analytics.appName(t)) || favEndpoints.contains(Analytics.endpointKey(t))
+    }
+    func toggleFavApp(_ name: String) { if favApps.contains(name) { favApps.remove(name) } else { favApps.insert(name) } }
+    func toggleFavEndpoint(_ key: String) { if favEndpoints.contains(key) { favEndpoints.remove(key) } else { favEndpoints.insert(key) } }
+    /// Only favourites, if there are any (the island always works this way).
+    func favouritesOnly(_ rows: [FfiTransaction]) -> [FfiTransaction] { hasFavourites ? rows.filter(isFavourite) : rows }
+    /// The newest calls the island looks at: favourites only when some are set.
+    var islandRows: [FfiTransaction] { favouritesOnly(Array(transactions.suffix(3000))) }
     @ObservationIgnored private var revision = 0
     @ObservationIgnored private var cache: (revision: Int, rows: [FfiTransaction])?
     @ObservationIgnored private var parsed: (query: String, filter: TrafficFilter?, error: String?)?
@@ -176,9 +194,10 @@ final class TrafficStore {
 
     /// Keeps the calls from the chosen app and device (no filter set: all of them).
     func scope(_ rows: [FfiTransaction]) -> [FfiTransaction] {
-        guard appFilter != nil || deviceFilter != nil else { return rows }
+        guard appFilter != nil || deviceFilter != nil || (focusMode && hasFavourites) else { return rows }
         return rows.filter { t in
-            (appFilter == nil || Analytics.appName(t) == appFilter) && (deviceFilter == nil || Analytics.deviceLabel(t) == deviceFilter)
+            (!(focusMode && hasFavourites) || isFavourite(t))
+                && (appFilter == nil || Analytics.appName(t) == appFilter) && (deviceFilter == nil || Analytics.deviceLabel(t) == deviceFilter)
         }
     }
 

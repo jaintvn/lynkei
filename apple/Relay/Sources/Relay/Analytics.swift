@@ -35,6 +35,19 @@ enum Analytics {
         return sorted[min(max(i, 0), sorted.count - 1)]
     }
 
+    /// Identifies an endpoint for favourites: `GET api.acme.com/v2/products/{id}` (a tunnel: `CONNECT host:443`).
+    static func endpointKey(_ t: FfiTransaction) -> String {
+        t.state == .tunneled ? "\(t.method) \(t.host):\(t.port)" : "\(t.method) \(t.host)\(foldPath(t.path))"
+    }
+
+    enum Platform { case ios, android, mac }
+    nonisolated(unsafe) static var devicePlatforms: [String: Platform] = [:]
+    static func platform(ofDevice name: String) -> Platform {
+        if let p = devicePlatforms[name] { return p }
+        if name == androidDevice { return .android }
+        return .mac
+    }
+
     static func nowMs() -> UInt64 { UInt64(Date().timeIntervalSince1970 * 1000) }
 
     static func ago(_ ms: UInt64, now: UInt64 = nowMs()) -> String {
@@ -105,6 +118,7 @@ struct EndpointStat: Identifiable {
     let method: String
     let path: String
     let host: String
+    var key = ""
     var calls = 0
     var errors = 0
     var durations: [UInt64] = []
@@ -131,6 +145,7 @@ extension Analytics {
             let key = "\(t.method) \(path) \(t.host)"
             var s = map[key] ?? EndpointStat(method: t.method, path: path, host: tunnel ? "TLS passthrough" : t.host)
             s.tunnel = tunnel
+            s.key = endpointKey(t)
             s.calls += 1
             if isError(t) { s.errors += 1 }
             s.durations.append(t.durationMs)

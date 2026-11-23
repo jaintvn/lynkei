@@ -14,7 +14,7 @@ struct MapLocalView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Map local").font(.system(size: 16, weight: .semibold))
+            Text("Mock with a file").font(.system(size: 16, weight: .semibold))
             Text("\(tx.method) \(tx.host)\(tx.path.split(separator: "?").first.map { String($0) } ?? "")")
                 .font(Theme.mono).foregroundStyle(Theme.muted).lineLimit(1).truncationMode(.middle)
             Text("Calls to this endpoint get the contents of this file instead of the server's answer.")

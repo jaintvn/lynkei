@@ -72,6 +72,13 @@ pub fn find_adb() -> Option<PathBuf> {
     candidates.into_iter().find(|p| p.is_file())
 }
 
+const CERT_FILE_ON_DEVICE: &str = "/sdcard/Download/relay-ca.crt";
+
+/// Android 11+ only installs CA certificates from Settings (Chrome says so too), and Settings reads
+/// the file through the system picker. Opening the file directly with a `file://` link fails with
+/// "the certificate file couldn't be read", which is what this replaces.
+const CERT_GUIDE: &str = "Relay saved relay-ca.crt in the phone's Downloads and opened Settings. Install it from there: Settings → Security → Encryption & credentials → Install a certificate → CA certificate → Install anyway → pick relay-ca.crt in Downloads. On Samsung: Settings → Security and privacy → More security settings → Install from device storage → CA certificate. A screen lock is required. Apps that ignore user certificates also need relay-debug-lib.";
+
 // ---------- model ----------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -383,39 +390,31 @@ impl DeviceManager {
         if self.try_system_install(d, &name).is_ok() {
             return StepState::Done("Relay CA added to the system certificate store".into());
         }
-        // Not rootable (Play Store images, real phones): hand over to the system installer.
-        let crt = "/sdcard/Download/relay-ca.crt";
+        // Not rootable (Play Store images, real phones): put the file where the Settings picker
+        // can find it and open Settings; the person finishes the install.
         let pushed = self
-            .adb(&d.id, &["push", &self.ca_path.to_string_lossy(), crt])
+            .adb(
+                &d.id,
+                &["push", &self.ca_path.to_string_lossy(), CERT_FILE_ON_DEVICE],
+            )
             .map(|o| o.ok)
             .unwrap_or(false);
-        if pushed {
-            let _ = self.adb(
-                &d.id,
-                &[
-                    "shell",
-                    "am",
-                    "start",
-                    "-a",
-                    "android.intent.action.VIEW",
-                    "-t",
-                    "application/x-x509-ca-cert",
-                    "-d",
-                    &format!("file://{crt}"),
-                ],
-            );
-            let _ = self.adb(
-                &d.id,
-                &[
-                    "shell",
-                    "am",
-                    "start",
-                    "-a",
-                    "android.settings.SECURITY_SETTINGS",
-                ],
+        if !pushed {
+            return StepState::Failed(
+                "could not copy the certificate to the phone (is USB file access allowed?)".into(),
             );
         }
-        StepState::NeedsAction("Install the certificate: Settings → Security → Encryption & credentials → Install a certificate → CA certificate → relay-ca.crt (apps that ignore user certificates also need relay-debug-lib)".into())
+        let _ = self.adb(
+            &d.id,
+            &[
+                "shell",
+                "am",
+                "start",
+                "-a",
+                "android.settings.SECURITY_SETTINGS",
+            ],
+        );
+        StepState::NeedsAction(CERT_GUIDE.into())
     }
 
     /// Rootable emulators: overlay the system CA directory with a tmpfs that also holds our CA.
@@ -724,7 +723,16 @@ mod tests {
             matches!(r.checklist.certificate, StepState::NeedsAction(_)),
             "non-rootable → guided install"
         );
+        assert!(
+            !fake.saw("file://"),
+            "Android's installer cannot read file:// paths"
+        );
         assert!(fake.saw("push /tmp/ca.pem /sdcard/Download/relay-ca.crt"));
+        assert!(fake.saw("android.settings.SECURITY_SETTINGS"));
+        assert!(
+            matches!(&r.checklist.certificate, StepState::NeedsAction(t) if t.contains("Install a certificate") && t.contains("Samsung")),
+            "the person gets the real steps, stock and Samsung"
+        );
         m.disconnect("emulator-5554").unwrap();
         assert!(fake.saw("http_proxy :0") && fake.saw("reverse --remove tcp:8888"));
     }

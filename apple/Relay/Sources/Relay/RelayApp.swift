@@ -14,7 +14,7 @@ struct RelayApp: App {
     }
 
     var body: some Scene {
-        WindowGroup("Relay") {
+        Window("Relay", id: "main") {
             ContentView()
                 .environment(store)
                 .frame(minWidth: 1400, minHeight: 700)
@@ -27,6 +27,12 @@ struct RelayApp: App {
         }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 1440, height: 900)
+        .commands {
+            CommandGroup(after: .newItem) {
+                Button("Open Session…") { SessionIO.open(store: store) }.keyboardShortcut("o")
+                Button("Share Session…") { SessionIO.share(store: store) }.keyboardShortcut("s", modifiers: [.command, .shift])
+            }
+        }
         MenuBarExtra("Relay", systemImage: "arrow.triangle.swap") {
             RelayMenuBar(island: island, store: store)
         }

@@ -118,19 +118,16 @@ final class ScenarioStore {
 
     func replay(_ name: String, store: TrafficStore) {
         guard let s = scenarios.first(where: { $0.name == name }) else { return }
-        var yaml = Self.removing(prefix: "scn-\(name)-", from: store.rulesYAML())
-        if yaml.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || yaml.contains("rules: []") { yaml = "rules:\n" }
-        if !yaml.hasSuffix("\n") { yaml += "\n" }
-        for (i, x) in s.exchanges.enumerated() {
-            yaml += Self.ruleYAML(scenario: name, index: i, x)
-        }
+        var block = ""
+        for (i, x) in s.exchanges.enumerated() { block += Self.ruleYAML(scenario: name, index: i, x) }
+        let yaml = Self.inserting(block, into: Self.removing(prefix: "scn-\(name)-", from: store.rulesYAML()))
         let problems = store.applyRulesYAML(yaml)
         message = problems.isEmpty ? "Replaying “\(name)”: \(s.exchanges.count) calls are answered from the recording" : "Could not replay: \(problems.joined(separator: "; "))"
     }
 
     func stopReplay(_ name: String, store: TrafficStore) {
-        _ = store.applyRulesYAML(Self.removing(prefix: "scn-\(name)-", from: store.rulesYAML()))
-        message = "Stopped “\(name)”: calls go to the real server again"
+        let problems = store.applyRulesYAML(Self.removing(prefix: "scn-\(name)-", from: store.rulesYAML()))
+        message = problems.isEmpty ? "Stopped “\(name)”: calls go to the real server again" : "Could not stop: \(problems.joined(separator: "; "))"
     }
 
     func delete(_ name: String, store: TrafficStore) {
@@ -154,6 +151,20 @@ final class ScenarioStore {
         return out
     }
 
+    /// Adds rule items at the end of the `rules:` list (before any key that follows it, such as `version:`).
+    static func inserting(_ block: String, into yaml: String) -> String {
+        var lines = yaml.replacingOccurrences(of: "rules: []", with: "rules:").components(separatedBy: "\n")
+        guard let start = lines.firstIndex(where: { $0.hasPrefix("rules:") }) else { return "rules:\n" + block + yaml }
+        var end = lines.count
+        for i in (start + 1)..<max(start + 1, lines.count) where !lines[i].isEmpty && !lines[i].hasPrefix("- ") && !lines[i].hasPrefix(" ") {
+            end = i
+            break
+        }
+        while end > start + 1, lines[end - 1].isEmpty { end -= 1 }
+        lines.insert(contentsOf: block.components(separatedBy: "\n").dropLast(), at: end)
+        return lines.joined(separator: "\n")
+    }
+
     /// Drops the list items whose `id:` starts with `prefix` from a rules YAML (a list of `- ` items, as Relay writes it).
     static func removing(prefix: String, from yaml: String) -> String {
         var out: [String] = []
@@ -163,7 +174,9 @@ final class ScenarioStore {
             item = []
         }
         for line in yaml.components(separatedBy: "\n") {
-            if line.hasPrefix("- ") { flush(); item = [line] } else if item.isEmpty { out.append(line) } else { item.append(line) }
+            if line.hasPrefix("- ") { flush(); item = [line] }
+            else if !item.isEmpty, line.isEmpty || line.hasPrefix(" ") { item.append(line) }
+            else { flush(); out.append(line) }
         }
         flush()
         return out.joined(separator: "\n")
@@ -191,7 +204,7 @@ struct ScenariosSection: View {
                 }
             }
             .padding(.leading, 8)
-            if scenarios.recordingSince != nil { RecordingBar() }
+            if scenarios.recordingSince != nil { RecordingBar(compact: true) }
             ForEach(scenarios.scenarios) { s in
                 let on = scenarios.isReplaying(s.name, rules: store.rules)
                 HStack(spacing: 8) {
@@ -225,13 +238,23 @@ struct RecordingBar: View {
     @Environment(TrafficStore.self) private var store
     private let scenarios = ScenarioStore.shared
 
+    var compact = false
+
     var body: some View {
-        HStack(spacing: 8) {
+        let label = HStack(spacing: 8) {
             Circle().fill(Theme.s5xx).frame(width: 8, height: 8)
-            Text("Recording · \(scenarios.recordedCalls(store).count) calls").font(.system(size: 12, weight: .medium))
-            Spacer()
+            Text("Recording · \(scenarios.recordedCalls(store).count) calls").font(.system(size: 12, weight: .medium)).lineLimit(1)
+        }
+        let buttons = HStack(spacing: 8) {
             Button("Cancel") { scenarios.cancelRecording() }.buttonStyle(.plain).foregroundStyle(Theme.muted).font(.system(size: 12))
             Button("Stop & save") { stopAndSave() }.buttonStyle(AccentButtonStyle(height: 24)).font(.system(size: 12, weight: .medium))
+        }
+        return Group {
+            if compact {
+                VStack(alignment: .leading, spacing: 6) { label; buttons }.frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                HStack(spacing: 8) { label; Spacer(); buttons }
+            }
         }
         .padding(.horizontal, 10).padding(.vertical, 6)
         .background(RoundedRectangle(cornerRadius: 8).fill(Theme.s5xx.opacity(0.10)))

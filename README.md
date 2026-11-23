@@ -169,6 +169,15 @@ Changes are grouped under **Request** and **Response** tabs. **Save rule** appli
 
 **Compose** (toolbar) sends a request you write; **Repeat** and **Edit & Repeat…** in a request's right-click menu resend a captured one, optionally edited. You can send it up to 200 times, one by one or all at once, which is handy for retry and race checks. The requests go through Relay, so they show up in the list and your rules and breakpoints apply to them. Only the text of a captured body is copied, so a binary or very large body needs to be pasted in.
 
+## Logs, scenarios, GraphQL, gRPC, analytics, sharing
+
+- **Logs:** with a simulator or Android device running, the inspector gets a *Logs* tab: what the app logged within 2 seconds of the call, with offsets from the request. Streams `simctl spawn … log stream` and `adb logcat`; turn it off in the `…` menu (*Capture device logs*).
+- **Scenarios:** *Rules → Scenarios → Record*, use the app, *Stop & save*. *Replay* answers those calls from the recording with no server (as Mock rules named `scn-<name>-N`). The same files are used by the MCP server.
+- **GraphQL:** every operation is its own endpoint (`POST /graphql · GetProducts`), batches are split, and a *GraphQL* tab shows query and variables.
+- **gRPC:** calls show as `Service/Method`; messages are decoded without a `.proto` file, as JSON keyed by field number.
+- **Analytics:** calls to GA4, Segment, Amplitude, Mixpanel and AppsFlyer get an *Events* tab with the decoded event names and properties.
+- **Share a session:** *File → Share Session…* (⇧⌘S) saves the calls in the list, and optionally your rules, scenarios and nearby logs, to one `.relay` file; Authorization, Cookie and API-key headers are hidden by default. Double-click a `.relay` file (or *File → Open Session…*, ⌘O) to see everything in the list.
+
 ## HAR import and export
 
 The **HAR** menu in the Mac app exports the requests matching your current search (or everything stored) as a HAR 1.2 file, and opens HAR files from Relay, browsers or Charles. Bodies in an export are the text previews Relay keeps, so large or binary bodies are cut or left out.

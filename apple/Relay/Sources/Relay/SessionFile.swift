@@ -172,22 +172,20 @@ enum SessionIO {
         func items(_ y: String) -> [[String]] {
             var out: [[String]] = []
             for line in y.components(separatedBy: "\n") {
-                if line.hasPrefix("- ") { out.append([line]) } else if !out.isEmpty, !line.isEmpty { out[out.count - 1].append(line) }
+                if line.hasPrefix("- ") { out.append([line]) } else if !out.isEmpty, line.hasPrefix(" ") { out[out.count - 1].append(line) }
             }
             return out
         }
         func id(_ item: [String]) -> String? { item.first { $0.hasPrefix("  id: ") || $0.hasPrefix("- id: ") }.map { String($0.drop { $0 != ":" }.dropFirst().trimmingCharacters(in: .whitespaces)) } }
         let have = Set(items(current).compactMap(id))
-        var base = current
-        if base.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || base.contains("rules: []") { base = "rules:\n" }
-        if !base.hasSuffix("\n") { base += "\n" }
+        var block = ""
         var added = 0
         for item in items(yaml) {
             guard let i = id(item), !have.contains(i) else { continue }
             added += 1
-            base += item.map { $0 == "  enabled: true" ? "  enabled: false" : ($0 == "- enabled: true" ? "- enabled: false" : $0) }.joined(separator: "\n") + "\n"
+            block += item.map { $0 == "  enabled: true" ? "  enabled: false" : ($0 == "- enabled: true" ? "- enabled: false" : $0) }.joined(separator: "\n") + "\n"
         }
-        return (base, added)
+        return (added == 0 ? current : ScenarioStore.inserting(block, into: current.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "rules:\n" : current), added)
     }
 
     // MARK: Panels
@@ -196,6 +194,12 @@ enum SessionIO {
     static func share(store: TrafficStore) {
         let calls = store.filtered
         guard !calls.isEmpty else { return alert("Nothing to share", "There are no calls in the list yet.") }
+        // For scripted runs: RELAY_SHARE_TO=<file> saves with the default options and no dialogs.
+        if let path = ProcessInfo.processInfo.environment["RELAY_SHARE_TO"] {
+            let file = make(name: "scripted", calls: calls, store: store, options: SessionOptions())
+            try? JSONEncoder().encode(file).write(to: URL(fileURLWithPath: path), options: .atomic)
+            return
+        }
         let a = NSAlert()
         a.messageText = "Share this session"
         a.informativeText = "Saves \(calls.count) call\(calls.count == 1 ? "" : "s") with headers, bodies and timings to one .relay file. Anyone with Relay can open it and see everything."
@@ -250,15 +254,15 @@ enum SessionIO {
             guard file.format == "relay-session" else { throw NSError(domain: "Relay", code: 2, userInfo: [NSLocalizedDescriptionKey: "This is not a Relay session file"]) }
             let n = store.addSession(file)
             var extra: [String] = []
-            if file.rulesYaml?.isEmpty == false || !file.scenarios.isEmpty {
+            let newRules = file.rulesYaml.map { mergeRules($0, into: store.rulesYAML()).added } ?? 0
+            if newRules > 0 || !file.scenarios.isEmpty {
                 let a = NSAlert()
                 a.messageText = "Also add the rules and scenarios?"
-                let rules = file.rulesYaml.map { mergeRules($0, into: store.rulesYAML()).added } ?? 0
-                a.informativeText = "This session also has \(rules) new rule\(rules == 1 ? "" : "s") and \(file.scenarios.count) scenario\(file.scenarios.count == 1 ? "" : "s"). Rules are added switched off; scenarios are not replayed until you press Replay."
+                a.informativeText = "This session also has \(newRules) new rule\(newRules == 1 ? "" : "s") and \(file.scenarios.count) scenario\(file.scenarios.count == 1 ? "" : "s"). Rules are added switched off; scenarios are not replayed until you press Replay."
                 a.addButton(withTitle: "Add them")
                 a.addButton(withTitle: "Not now")
                 if a.runModal() == .alertFirstButtonReturn {
-                    if let y = file.rulesYaml, rules > 0 {
+                    if newRules > 0, let y = file.rulesYaml {
                         let merged = mergeRules(y, into: store.rulesYAML())
                         _ = store.applyRulesYAML(merged.yaml)
                         extra.append("\(merged.added) rules")

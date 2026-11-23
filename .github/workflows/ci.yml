@@ -1,9 +1,8 @@
 name: CI
 
+# Manual only, to save CI minutes: run it from the Actions tab (Run workflow) or `gh workflow run CI`.
 on:
-  push:
-    branches: [main]
-  pull_request:
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.ref }}

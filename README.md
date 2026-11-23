@@ -121,6 +121,18 @@ A request row shows a small badge for each rule that touched it, and the inspect
 
 In the Mac app, **Rules** (toolbar) lists rules with on/off switches and a YAML editor, and right-clicking a request adds a rule for it: breakpoint, block, send the host to another address, map local (pick or type the path of a file to answer with, or reuse the recorded response, saved under `mocks/`), throttle to 3G, or make it fail.
 
+## AI agents (MCP)
+
+`relay-mcp` is a Model Context Protocol server (stdio) over the same control API the app and CLI use, so an agent can connect a device, read traffic, add rules and handle paused calls. Start `relayd` (or the Mac app's daemon), build it with `cargo build -p relay-mcp --release`, then register it:
+
+```bash
+claude mcp add relay -- /path/to/relay-mcp          # Claude Code
+# or in any MCP client's config:
+# { "mcpServers": { "relay": { "command": "/path/to/relay-mcp" } } }
+```
+
+It finds the daemon through `RELAY_DATA_DIR` (default: the app's data folder); `--socket <path>` or `--data-dir <dir>` override that. Tools: `status`, `proxy_start`, `proxy_stop`, `list_devices`, `connect_device`, `disconnect_device`, `search_traffic`, `get_transaction`, `clear_traffic`, `list_rules`, `add_rule`, `toggle_rule`, `delete_rule`, `get_settings`, `set_ssl_decrypt`, `set_throttle`, `list_paused`, `wait_paused`, `resume_paused`, `abort_paused`, `ca_info`. `Authorization`, cookies and API-key headers are redacted, and bodies are left out, unless the call asks for `include_secrets` / `include_bodies`. Not yet: sending requests, scenarios, subscriptions and prompts.
+
 ## Mac app
 
 ```bash

@@ -17,8 +17,7 @@ struct RelayApp: App {
         WindowGroup("Relay") {
             ContentView()
                 .environment(store)
-                .frame(minWidth: 1100, minHeight: 680)
-                .preferredColorScheme(.dark)
+                .frame(minWidth: 1400, minHeight: 700)
                 .onAppear {
                     store.start()
                     island.start()
@@ -26,6 +25,7 @@ struct RelayApp: App {
                 .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in store.shutdown() }
         }
         .windowStyle(.hiddenTitleBar)
+        .defaultSize(width: 1440, height: 900)
         MenuBarExtra("Relay", systemImage: "arrow.triangle.swap") {
             RelayMenuBar(island: island, store: store)
         }

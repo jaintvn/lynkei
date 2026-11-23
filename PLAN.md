@@ -290,6 +290,8 @@ An on-device debugger: install it on the test phone, tap **Start**, and see and 
 - Apps targeting API 24+ still ignore user CAs. **`relay-debug-lib`** (the Gradle plugin from the Mac plan) fixes that for your own debug builds, and the app explains it in one screen when it detects the issue.
 - Pinning detection and one-click passthrough, the same as on the Mac.
 
+**Mac UI aligned with the canvas (2026-11-23).** The Mac app now follows the canvas screen by screen: header with Dashboard / Traffic / Endpoints / Rules, Traffic with the Devices / Apps / Domains / Rules sidebar, status chips with counts and facet filters, the call table with type badge and rule badge, the inspector with Overview / Request / Response / Timing tabs, the Endpoints table (IDs folded to `{id}`), the Dashboard (KPIs, failing and slow endpoints, active rules, top hosts, live calls), the Rules builder (rules grouped by kind, When / Then, live preview and diff) and the full-window Breakpoint editor. Colours are the canvas's dark and light tokens and follow the system appearance. Known differences: the timing split (DNS / connect / TLS) is not measured by the core yet, so Timing shows the total; the breakpoint method and URL are shown but not editable; Compose, HAR and Clear live in the toolbar's "…" menu.
+
 ### 8.3 Android UI (Jetpack Compose, same design tokens as the Mac)
 - **Home:** big Start/Stop button, app picker (search installed apps, with icons), CA status, live counters.
 - **Traffic list:** same columns, chips and search DSL as the Mac; group by endpoint; swipe actions for *Breakpoint*, *Mock*, *Repeat* and *Share as cURL*.

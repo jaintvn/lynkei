@@ -1,0 +1,631 @@
+import RelayKit
+import SwiftUI
+import UniformTypeIdentifiers
+
+/// Traffic: toolbar, sources sidebar, filter chips, the call list and the inspector (canvas board 3).
+struct TrafficScreen: View {
+    @Environment(TrafficStore.self) private var store
+    @Environment(Sheets.self) private var sheets
+    @Binding var screen: Screen
+
+    @State private var statusFilter = "all"
+    @State private var methodFilter: String?
+    @State private var typeFilter: String?
+    @State private var versionFilter: String?
+    @State private var deviceFilter: String?
+    @State private var simulators: [BootedSimulator] = []
+    @State private var simMessage: String?
+
+    var body: some View {
+        @Bindable var store = store
+        VStack(spacing: 0) {
+            AppHeader(screen: $screen) { toolbar(search: $store.search) }
+            HStack(spacing: 0) {
+                TrafficSidebar()
+                    .frame(width: 220)
+                    .background(Theme.panel)
+                    .overlay(alignment: .trailing) { Rectangle().fill(Theme.line).frame(width: 1) }
+                center
+                InspectorView(tx: store.selected)
+                    .frame(width: 440)
+                    .background(Theme.panel)
+                    .overlay(alignment: .leading) { Rectangle().fill(Theme.line).frame(width: 1) }
+            }
+        }
+        .onAppear { simulators = Simulators.booted() }
+    }
+
+    // MARK: Toolbar
+
+    private func toolbar(search: Binding<String>) -> some View {
+        HStack(spacing: 8) {
+            deviceMenu
+
+            Button(action: { store.isRunning ? store.stop() : store.start() }) {
+                HStack(spacing: 6) {
+                    Circle().fill(store.isRunning ? Theme.s5xx : Theme.faint).frame(width: 8, height: 8)
+                    Text(store.isRunning ? "Recording" : "Paused")
+                }
+                .font(.system(size: 12.5))
+                .padding(.horizontal, 10)
+                .frame(height: 30)
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.line2))
+            }
+            .buttonStyle(.plain)
+            .fixedSize()
+            .help(store.isRunning ? "Stop capturing" : "Start capturing")
+
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass").font(.system(size: 12)).foregroundStyle(Theme.muted)
+                TextField("status:5xx host:api duration:>800ms", text: search)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 12, design: .monospaced))
+                Text("⌘K")
+                    .font(.system(size: 11)).foregroundStyle(Theme.faint)
+                    .padding(.horizontal, 5).padding(.vertical, 1)
+                    .overlay(RoundedRectangle(cornerRadius: 5).stroke(Theme.line2))
+            }
+            .padding(.horizontal, 10)
+            .frame(minWidth: 120, maxWidth: .infinity)
+            .frame(height: 32)
+            .background(RoundedRectangle(cornerRadius: 9).fill(Theme.raised))
+            .overlay(RoundedRectangle(cornerRadius: 9).stroke(store.searchError == nil ? Theme.line2 : Theme.s5xx))
+            .help(store.searchError ?? "Filter language: app: client: host: path: method: status: header:name=value body: duration: size:")
+
+            toolsGroup
+
+            moreMenu
+        }
+    }
+
+    private var deviceMenu: some View {
+        let ds = store.deviceStore()
+        let live = ds.devices.filter { ds.isConnected($0) }
+        return Menu {
+            if ds.devices.isEmpty { Text("No simulators or phones found") }
+            ForEach(ds.devices, id: \.id) { d in
+                Text("\(ds.isConnected(d) ? "● " : "○ ")\(d.name) — \(d.os)")
+            }
+            Divider()
+            Button("Connect device…") { sheets.showConnect = true }
+            if !simulators.isEmpty { Divider() }
+            ForEach(simulators) { sim in
+                Button("Trust Relay CA in \(sim.name) (\(sim.runtime))") { installCA(sim) }
+            }
+            Button("Refresh") { simulators = Simulators.booted(); Task { await ds.refresh() } }
+        } label: {
+            HStack(spacing: 8) {
+                Circle().fill(live.isEmpty ? Theme.faint : Theme.s2xx).frame(width: 7, height: 7)
+                    .shadow(color: live.isEmpty ? .clear : Theme.s2xx.opacity(0.4), radius: 3)
+                Text(live.isEmpty ? "No devices" : "\(live.count) device\(live.count == 1 ? "" : "s")").fontWeight(.medium)
+                if !live.isEmpty {
+                    Text(live.prefix(2).map(\.name).joined(separator: " · ")).foregroundStyle(Theme.muted).lineLimit(1)
+                }
+                Image(systemName: "chevron.down").font(.system(size: 9, weight: .semibold)).foregroundStyle(Theme.muted)
+            }
+            .font(.system(size: 12.5))
+            .padding(.horizontal, 10)
+            .frame(height: 30)
+            .background(RoundedRectangle(cornerRadius: 8).fill(Theme.raised))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.line2))
+        }
+        .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+        .onAppear { ds.startWatching() }
+    }
+
+    /// SSL, Breakpoints, Rewrite, Map Local, Throttle: the live switches.
+    private var toolsGroup: some View {
+        HStack(spacing: 2) {
+            toolToggle("SSL", on: store.decrypt, dot: Theme.s2xx, help: "Decrypt HTTPS so bodies can be read") { store.setDecrypt(!store.decrypt) }
+            ForEach(["breakpoint", "rewrite", "map local"], id: \.self) { kind in
+                let rules = store.rules.filter { $0.kind == kind }
+                toolToggle(RuleStyle.group(kind), on: rules.contains(where: \.enabled), dot: kind == "breakpoint" ? Theme.paused : Theme.s2xx,
+                           help: rules.isEmpty ? "No \(kind) rules yet" : "Switch all \(kind) rules on or off") {
+                    let anyOn = rules.contains(where: \.enabled)
+                    for r in rules { store.setRule(r.id, enabled: !anyOn) }
+                }
+            }
+            Menu {
+                Button("Off") { store.setGlobalThrottle(nil) }
+                Divider()
+                ForEach(store.throttlePresets, id: \.self) { p in
+                    Button(p) { store.setGlobalThrottle(p) }
+                }
+            } label: {
+                toolLabel("Throttle", on: store.globalThrottle != nil, dot: Theme.s4xx)
+            }
+            .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+        }
+        .padding(3)
+        .background(RoundedRectangle(cornerRadius: 9).fill(Theme.raised))
+        .overlay(RoundedRectangle(cornerRadius: 9).stroke(Theme.line))
+        .fixedSize()
+    }
+
+    private func toolToggle(_ label: String, on: Bool, dot: Color, help: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) { toolLabel(label, on: on, dot: dot) }
+            .buttonStyle(.plain)
+            .help(help)
+    }
+
+    private func toolLabel(_ label: String, on: Bool, dot: Color) -> some View {
+        HStack(spacing: 6) {
+            Circle().fill(on ? dot : Theme.line2).frame(width: 6, height: 6)
+            Text(label)
+        }
+        .font(.system(size: 12, weight: .medium))
+        .foregroundStyle(on ? Theme.fg : Theme.muted)
+        .padding(.horizontal, 9)
+        .frame(height: 26)
+        .background(RoundedRectangle(cornerRadius: 6).fill(on ? Theme.panel : .clear))
+        .contentShape(Rectangle())
+    }
+
+    private var moreMenu: some View {
+        Menu {
+            Button("Compose request…") { sheets.composing = ComposeDraft() }
+            Divider()
+            Button("Export HAR…") { exportHAR() }
+            Button("Import HAR…") { importHAR() }
+            Divider()
+            Button("Clear all") { store.clear() }
+        } label: {
+            Image(systemName: "ellipsis")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(Theme.muted)
+                .frame(width: 30, height: 30)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Theme.raised))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.line2))
+        }
+        .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+        .help("Compose, HAR import and export, clear")
+    }
+
+    private func installCA(_ sim: BootedSimulator) {
+        do {
+            try Simulators.installCA(udid: sim.id, certPath: store.caPath)
+            simMessage = "Relay CA trusted in \(sim.name)"
+        } catch {
+            simMessage = "Could not install CA: \(error.localizedDescription)"
+        }
+    }
+
+    private func exportHAR() {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.json]
+        panel.nameFieldStringValue = "relay-traffic.har"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            try store.exportHAR().write(to: url, atomically: true, encoding: .utf8)
+        } catch {
+            store.errorMessage = "Export failed: \(error.localizedDescription)"
+        }
+    }
+
+    private func importHAR() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.json, .data]
+        panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            let n = try store.importHAR(String(contentsOf: url, encoding: .utf8))
+            store.status = "Imported \(n) request\(n == 1 ? "" : "s") from \(url.lastPathComponent)"
+        } catch {
+            store.errorMessage = "Import failed: \(error)"
+        }
+    }
+
+    // MARK: Center
+
+    private var base: [FfiTransaction] { store.filtered }
+
+    private func statusGroup(_ t: FfiTransaction) -> String {
+        if t.state == .failed { return "failed" }
+        switch t.status ?? 0 {
+        case 200..<300: return "2xx"
+        case 300..<400: return "3xx"
+        case 400..<500: return "4xx"
+        case 500...: return "5xx"
+        default: return "other"
+        }
+    }
+
+    private var rows: [FfiTransaction] {
+        base.filter { t in
+            if statusFilter == "failed", !(t.state == .failed || (t.status ?? 0) >= 500) { return false }
+            if statusFilter != "all", statusFilter != "failed", statusGroup(t) != statusFilter { return false }
+            if let m = methodFilter, t.method != m { return false }
+            if let ty = typeFilter, Analytics.typeBadge(t) != ty { return false }
+            if let v = versionFilter, Analytics.apiVersion(t.path) != v { return false }
+            if let d = deviceFilter, Analytics.deviceLabel(t) != d { return false }
+            return true
+        }
+    }
+
+    private var center: some View {
+        let shown = rows
+        return VStack(spacing: 0) {
+            chips
+            tableHeader
+            if store.transactions.isEmpty {
+                EmptyStateView(port: store.port, caPath: store.caPath)
+            } else {
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(spacing: 0) {
+                            ForEach(shown) { tx in
+                                TrafficRow(tx: tx, selected: tx.id == store.selection, kinds: tx.appliedRules.map { store.ruleKind($0) })
+                                    .contentShape(Rectangle())
+                                    .onTapGesture { store.selection = tx.id }
+                                    .contextMenu { ruleMenu(for: tx) }
+                                    .id(tx.id)
+                            }
+                        }
+                    }
+                    .onChange(of: store.transactions.count) {
+                        if store.selection == nil, let last = shown.last { proxy.scrollTo(last.id, anchor: .bottom) }
+                    }
+                }
+            }
+            footer(shown: shown.count)
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    private var chips: some View {
+        let list = base
+        let counts: [String: Int] = [
+            "all": list.count,
+            "2xx": list.filter { statusGroup($0) == "2xx" }.count,
+            "3xx": list.filter { statusGroup($0) == "3xx" }.count,
+            "4xx": list.filter { statusGroup($0) == "4xx" }.count,
+            "5xx": list.filter { statusGroup($0) == "5xx" }.count,
+            "failed": list.filter { $0.state == .failed || ($0.status ?? 0) >= 500 }.count,
+        ]
+        let defs: [(String, String, Color)] = [
+            ("all", "All", Theme.muted), ("2xx", "2xx", Theme.s2xx), ("3xx", "3xx", Theme.s3xx),
+            ("4xx", "4xx", Theme.s4xx), ("5xx", "5xx", Theme.s5xx), ("failed", "Failed", Theme.failed),
+        ]
+        return FlowLayout(spacing: 6) {
+            ForEach(defs, id: \.0) { id, label, dot in
+                let on = statusFilter == id
+                Button { statusFilter = id } label: {
+                    HStack(spacing: 6) {
+                        Circle().fill(dot).frame(width: 6, height: 6)
+                        Text(label)
+                        Text("\(counts[id] ?? 0)").font(.system(size: 11, design: .monospaced)).foregroundStyle(Theme.muted)
+                    }
+                    .font(.system(size: 12, weight: .medium))
+                    .padding(.horizontal, 10)
+                    .frame(height: 26)
+                    .background(Capsule().fill(on ? Theme.selection : .clear))
+                    .overlay(Capsule().stroke(on ? Theme.accent : Theme.line2))
+                }
+                .buttonStyle(.plain)
+            }
+            facet("Method", value: methodFilter, options: Array(Set(list.map(\.method))).sorted()) { methodFilter = $0 }
+            facet("Type", value: typeFilter, options: Array(Set(list.map(Analytics.typeBadge))).filter { !$0.isEmpty }.sorted()) { typeFilter = $0 }
+            facet("Device", value: deviceFilter, options: Array(Set(list.map(Analytics.deviceLabel))).sorted()) { deviceFilter = $0 }
+            facet("API version", value: versionFilter, options: Array(Set(list.compactMap { Analytics.apiVersion($0.path) })).sorted()) { versionFilter = $0 }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .overlay(alignment: .bottom) { Rectangle().fill(Theme.line).frame(height: 1) }
+    }
+
+    private func facet(_ name: String, value: String?, options: [String], set: @escaping (String?) -> Void) -> some View {
+        Menu {
+            Button("Any") { set(nil) }
+            if !options.isEmpty { Divider() }
+            ForEach(options, id: \.self) { o in Button(o) { set(o) } }
+        } label: {
+            if let value {
+                HStack(spacing: 5) {
+                    Text("\(name): \(value)")
+                    Image(systemName: "chevron.down").font(.system(size: 8, weight: .bold))
+                }
+                .font(.system(size: 12)).foregroundStyle(Theme.fg)
+                .padding(.horizontal, 9).frame(height: 26)
+                .background(Capsule().fill(Theme.selection))
+                .overlay(Capsule().stroke(Theme.accent))
+            } else {
+                DashedChip(label: name)
+            }
+        }
+        .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+    }
+
+    private var tableHeader: some View {
+        HStack(spacing: 8) {
+            Text("STATUS").frame(width: 52, alignment: .leading)
+            Text("METHOD").frame(width: 58, alignment: .leading)
+            Text("ENDPOINT").frame(minWidth: 150, maxWidth: .infinity, alignment: .leading)
+            Text("HOST").frame(minWidth: 90, maxWidth: 150, alignment: .leading)
+            Text("DEVICE").frame(width: 70, alignment: .leading)
+            Text("DURATION").frame(width: 104, alignment: .leading)
+            Text("SIZE").frame(width: 58, alignment: .trailing)
+            Color.clear.frame(width: 26)
+        }
+        .font(.system(size: 11, weight: .semibold))
+        .lineLimit(1)
+        .tracking(0.4)
+        .foregroundStyle(Theme.faint)
+        .padding(.horizontal, 14)
+        .frame(height: 30)
+        .background(Theme.bg)
+        .overlay(alignment: .bottom) { Rectangle().fill(Theme.line).frame(height: 1) }
+    }
+
+    @ViewBuilder
+    private func ruleMenu(for tx: FfiTransaction) -> some View {
+        Button("Rewrite this call…") { sheets.rewriting = RewriteDraft(copying: tx) }
+        Divider()
+        Button("Repeat") { store.repeatNow(tx) }
+        Button("Edit & Repeat…") { sheets.composing = ComposeDraft(copying: tx) }
+        Divider()
+        Button("Breakpoint on \(tx.host)\(tx.path.split(separator: "?").first.map { String($0) } ?? "")") { store.addQuickRule("breakpoint", for: tx) }
+        Button("Block this request") { store.addQuickRule("block", for: tx) }
+        Button("Map local to a file…") { sheets.mapLocalFor = tx }
+        Button("Send \(tx.host) to another address…") { sheets.dnsFor = tx }
+        Divider()
+        Button("Throttle to 3G") { store.addQuickRule("throttle-3g", for: tx) }
+        Button("Make it fail (offline)") { store.addQuickRule("offline", for: tx) }
+    }
+
+    private func footer(shown: Int) -> some View {
+        HStack(spacing: 16) {
+            Text("**\(shown)** of \(store.transactions.count) requests")
+                .foregroundStyle(Theme.muted)
+            let failing = store.transactions.filter { $0.state == .failed || ($0.status ?? 0) >= 500 }.count
+            if failing > 0 {
+                Text("\(Text("●").foregroundStyle(Theme.s5xx)) \(failing) failing")
+            }
+            Text(formatBytes(store.transactions.reduce(0) { $0 + $1.responseBodySize + $1.requestBodySize }))
+            if let simMessage { Text(simMessage).foregroundStyle(Theme.accent) }
+            if let m = store.ruleMessage { Text(m).foregroundStyle(Theme.s5xx).lineLimit(1) }
+            if let err = store.errorMessage { Text(err).foregroundStyle(Theme.s5xx).lineLimit(1) }
+            Spacer()
+            Text("\(store.status) · SSL \(store.decrypt ? "on" : "off")")
+        }
+        .font(.system(size: 11.5))
+        .foregroundStyle(Theme.muted)
+        .padding(.horizontal, 14)
+        .frame(height: 28)
+        .background(Theme.panel)
+        .overlay(alignment: .top) { Rectangle().fill(Theme.line).frame(height: 1) }
+    }
+}
+
+// MARK: - Row
+
+struct TrafficRow: View {
+    let tx: FfiTransaction
+    let selected: Bool
+    var kinds: [String] = []
+
+    var body: some View {
+        HStack(spacing: 8) {
+            StatusPill(tx: tx).frame(width: 52, alignment: .leading)
+            Text(tx.method)
+                .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
+                .foregroundStyle(methodColor(tx.method))
+                .frame(width: 58, alignment: .leading)
+            HStack(spacing: 8) {
+                let badge = Analytics.typeBadge(tx)
+                if !badge.isEmpty {
+                    Text(badge)
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(Theme.muted)
+                        .padding(.horizontal, 5).padding(.vertical, 1)
+                        .overlay(RoundedRectangle(cornerRadius: 4).stroke(Theme.line2))
+                }
+                Text(tx.state == .tunneled ? "\(tx.host):\(tx.port)" : tx.path)
+                    .font(.system(size: 12, design: .monospaced))
+                    .lineLimit(1).truncationMode(.middle)
+            }
+            .frame(minWidth: 150, maxWidth: .infinity, alignment: .leading)
+            Text(tx.host)
+                .font(.system(size: 12)).foregroundStyle(Theme.muted)
+                .lineLimit(1).truncationMode(.middle)
+                .frame(minWidth: 90, maxWidth: 150, alignment: .leading)
+            Text(Analytics.deviceLabel(tx))
+                .font(.system(size: 12)).foregroundStyle(Theme.muted)
+                .lineLimit(1)
+                .frame(width: 70, alignment: .leading)
+            DurationBar(ms: tx.durationMs).frame(width: 104)
+            Text(tx.responseBodySize == 0 ? "—" : formatBytes(tx.responseBodySize))
+                .font(.system(size: 11.5, design: .monospaced))
+                .foregroundStyle(Theme.muted)
+                .lineLimit(1)
+                .frame(width: 58, alignment: .trailing)
+            Group {
+                if let kind = Array(Set(kinds.filter { !$0.isEmpty })).sorted().first {
+                    RuleLetter(kind: kind).help("Rule applied: \(kind)")
+                } else {
+                    Color.clear
+                }
+            }
+            .frame(width: 26)
+        }
+        .padding(.horizontal, 14)
+        .frame(height: 32)
+        .background(selected ? Theme.selection : (isError ? Theme.s5xx.opacity(0.05) : .clear))
+        .overlay(alignment: .leading) { if selected { Rectangle().fill(Theme.accent).frame(width: 2) } }
+        .overlay(alignment: .bottom) { Rectangle().fill(Theme.line).frame(height: 1) }
+    }
+
+    private var isError: Bool { tx.state == .failed || (tx.status ?? 0) >= 500 }
+}
+
+// MARK: - Sidebar
+
+/// Devices, apps, domains with their endpoints, and rules (canvas board 3, left column).
+struct TrafficSidebar: View {
+    @Environment(TrafficStore.self) private var store
+    @Environment(Sheets.self) private var sheets
+    @State private var expanded: Set<String> = []
+    @State private var seeded = false
+
+    var body: some View {
+        // Redo the counts once a second rather than on every captured call.
+        TimelineView(.periodic(from: .now, by: 1)) { _ in
+            let hosts = hostSummary()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    devices
+                    apps
+                    domains(hosts)
+                    rules
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 14)
+            }
+            .onAppear {
+                if !seeded, let first = hosts.first { expanded = [first.host]; seeded = true }
+            }
+        }
+    }
+
+    private var devices: some View {
+        let ds = store.deviceStore()
+        return VStack(alignment: .leading, spacing: 2) {
+            SectionLabel("Devices").padding(.leading, 8).padding(.bottom, 6)
+            if ds.devices.isEmpty {
+                Button { sheets.showConnect = true } label: {
+                    Text("Connect a device…").font(.system(size: 12)).foregroundStyle(Theme.accent)
+                        .padding(.horizontal, 8).padding(.vertical, 6)
+                }
+                .buttonStyle(.plain)
+            }
+            ForEach(ds.devices, id: \.id) { d in
+                let on = ds.isConnected(d)
+                Button { sheets.showConnect = true } label: {
+                    HStack(spacing: 9) {
+                        Circle().fill(on ? Theme.s2xx : Theme.s4xx).frame(width: 7, height: 7)
+                        VStack(alignment: .leading, spacing: 0) {
+                            Text(d.name).font(.system(size: 13, weight: .medium)).lineLimit(1)
+                            Text(on ? "\(d.os) · ready" : "\(d.os) · not connected")
+                                .font(.system(size: 11)).foregroundStyle(on ? Theme.muted : Theme.s4xx).lineLimit(1)
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.horizontal, 8).padding(.vertical, 6)
+                    .background(RoundedRectangle(cornerRadius: 7).fill(on ? Theme.selection : .clear))
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+
+    private var apps: some View {
+        let procs = store.processesSeen.prefix(6)
+        return VStack(alignment: .leading, spacing: 2) {
+            SectionLabel("Apps").padding(.leading, 8).padding(.bottom, 6)
+            if procs.isEmpty {
+                Text("Apps show up as they make requests").font(.system(size: 12)).foregroundStyle(Theme.faint).padding(.horizontal, 8)
+            }
+            ForEach(Array(procs), id: \.name) { p in
+                let key = "app:\(p.name.contains(" ") ? "\"\(p.name)\"" : p.name)"
+                let on = store.source == key
+                Button { store.source = on ? nil : key } label: {
+                    HStack(spacing: 9) {
+                        Text(String(p.name.prefix(1)).uppercased())
+                            .font(.system(size: 10, weight: .bold)).foregroundStyle(.white)
+                            .frame(width: 18, height: 18)
+                            .background(RoundedRectangle(cornerRadius: 5).fill(LinearGradient(colors: [Color(hex: 0xFF8A5B), Color(hex: 0xFF5277)], startPoint: .topLeading, endPoint: .bottomTrailing)))
+                        Text(p.name).font(.system(size: 13)).lineLimit(1)
+                        Spacer(minLength: 0)
+                        Text("\(p.count)").font(.system(size: 11, design: .monospaced)).foregroundStyle(Theme.muted)
+                    }
+                    .padding(.horizontal, 8).padding(.vertical, 6)
+                    .background(RoundedRectangle(cornerRadius: 7).fill(on ? Theme.selection : .clear))
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+
+    private struct HostRow { let host: String; let count: Int; let paths: [(path: String, color: Color)] }
+
+    private func hostSummary() -> [HostRow] {
+        var byHost: [String: [FfiTransaction]] = [:]
+        for t in store.transactions { byHost[t.host, default: []].append(t) }
+        let pausedHosts = Set(store.paused.compactMap { URL(string: $0.url)?.host })
+        return byHost.map { host, txs in
+            var byPath: [String: (n: Int, worst: Int)] = [:]
+            for t in txs where t.state != .tunneled {
+                let p = Analytics.foldPath(t.path)
+                var e = byPath[p] ?? (0, 0)
+                e.n += 1
+                let s = t.state == .failed ? 5 : Int(t.status ?? 0) / 100
+                e.worst = max(e.worst, s >= 4 ? s : 2)
+                byPath[p] = e
+            }
+            let paths = byPath.sorted { $0.value.n > $1.value.n }.prefix(6).map { p, e -> (path: String, color: Color) in
+                (p, e.worst >= 5 ? Theme.s5xx : e.worst == 4 ? Theme.s4xx : (pausedHosts.contains(host) ? Theme.paused : Theme.s2xx))
+            }
+            return HostRow(host: host, count: txs.count, paths: paths)
+        }
+        .sorted { $0.count > $1.count }
+    }
+
+    private func domains(_ hosts: [HostRow]) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            SectionLabel("Domains").padding(.leading, 8).padding(.bottom, 6)
+            if hosts.isEmpty {
+                Text("None yet").font(.system(size: 12)).foregroundStyle(Theme.faint).padding(.horizontal, 8)
+            }
+            ForEach(hosts.prefix(12), id: \.host) { h in
+                let open = expanded.contains(h.host)
+                let active = store.search == "host:\(h.host)"
+                HStack(spacing: 6) {
+                    Image(systemName: open ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 8.5, weight: .bold)).foregroundStyle(Theme.muted).frame(width: 10)
+                        .onTapGesture { if open { expanded.remove(h.host) } else { expanded.insert(h.host) } }
+                    Text(h.host).font(.system(size: 13, weight: open ? .medium : .regular))
+                        .foregroundStyle(open || active ? Theme.fg : Theme.muted).lineLimit(1)
+                    Spacer(minLength: 0)
+                    Text("\(h.count)").font(.system(size: 11, design: .monospaced)).foregroundStyle(Theme.muted)
+                }
+                .padding(.horizontal, 8).padding(.vertical, 5)
+                .background(RoundedRectangle(cornerRadius: 7).fill(active ? Theme.selection : .clear))
+                .contentShape(Rectangle())
+                .onTapGesture { store.search = active ? "" : "host:\(h.host)" }
+                if open {
+                    ForEach(h.paths, id: \.path) { p in
+                        HStack(spacing: 6) {
+                            Circle().fill(p.color).frame(width: 5, height: 5)
+                            Text(p.path).font(.system(size: 11.5, design: .monospaced)).foregroundStyle(Theme.muted).lineLimit(1)
+                            Spacer(minLength: 0)
+                        }
+                        .padding(.leading, 26).padding(.trailing, 8).padding(.vertical, 4)
+                    }
+                }
+            }
+        }
+    }
+
+    private var rules: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            SectionLabel("Rules").padding(.leading, 8).padding(.bottom, 4)
+            if store.rules.isEmpty {
+                Text("Right-click a call to add one").font(.system(size: 12)).foregroundStyle(Theme.faint).padding(.horizontal, 8)
+            }
+            ForEach(store.rules.prefix(8), id: \.id) { r in
+                HStack(spacing: 8) {
+                    VStack(alignment: .leading, spacing: 0) {
+                        Text(RuleStyle.group(r.kind) == "Breakpoints" ? "Breakpoint" : RuleStyle.group(r.kind))
+                            .font(.system(size: 12, weight: .medium))
+                        Text(r.summary).font(.system(size: 11, design: .monospaced)).foregroundStyle(Theme.muted).lineLimit(1)
+                    }
+                    Spacer(minLength: 0)
+                    RelaySwitch(isOn: Binding(get: { r.enabled }, set: { store.setRule(r.id, enabled: $0) }))
+                }
+                .padding(.horizontal, 8).padding(.vertical, 5)
+            }
+        }
+    }
+}

@@ -267,6 +267,8 @@ final class IslandController {
 
 /// Borderless panel that never takes focus from the app being debugged.
 final class IslandPanel: NSPanel {
+    /// The island is black glass whatever the system appearance, so its colours stay the dark ones.
+    override var effectiveAppearance: NSAppearance { NSAppearance(named: .darkAqua)! }
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
 }

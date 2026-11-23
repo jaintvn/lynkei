@@ -1,347 +1,102 @@
 import RelayKit
 import SwiftUI
-import UniformTypeIdentifiers
+
+/// The four screens of the app, as in the design canvas: Dashboard, Traffic, Endpoints, Rules.
+enum Screen: String, CaseIterable, Hashable {
+    case dashboard = "Dashboard", traffic = "Traffic", endpoints = "Endpoints", rules = "Rules"
+}
+
+/// Sheets that more than one screen can open (rewrite, compose, map local…).
+@MainActor
+@Observable
+final class Sheets {
+    var showConnect = false
+    var mapLocalFor: FfiTransaction?
+    var composing: ComposeDraft?
+    var dnsFor: FfiTransaction?
+    var rewriting: RewriteDraft?
+    /// Rule to select when the Rules screen opens.
+    var ruleToOpen: String?
+}
 
 struct ContentView: View {
     @Environment(TrafficStore.self) private var store
-    @State private var simulators: [BootedSimulator] = []
-    @State private var simMessage: String?
-    @State private var showConnect = false
-    @State private var showRules = false
-    @State private var mapLocalFor: FfiTransaction?
-    @State private var composing: ComposeDraft?
-    @State private var dnsFor: FfiTransaction?
-    @State private var rewriting: RewriteDraft?
+    @State private var screen: Screen = Screen(rawValue: ProcessInfo.processInfo.environment["RELAY_SCREEN"] ?? "") ?? .traffic
+    @State private var sheets = Sheets()
 
     var body: some View {
-        @Bindable var store = store
-        VStack(spacing: 0) {
-            toolbar(search: $store.search)
-            Divider().overlay(Theme.line)
-            HStack(spacing: 0) {
-                trafficList
-                Divider().overlay(Theme.line)
-                InspectorView(tx: store.selected)
-                    .frame(width: 440)
-                    .background(Theme.panel)
+        @Bindable var sheets = sheets
+        Group {
+            if store.paused.first != nil {
+                BreakpointScreen()
+            } else {
+                switch screen {
+                case .dashboard: DashboardView(screen: $screen)
+                case .traffic: TrafficScreen(screen: $screen)
+                case .endpoints: EndpointsView(screen: $screen)
+                case .rules: RulesScreen(screen: $screen)
+                }
             }
-            Divider().overlay(Theme.line)
-            footer
         }
         .background(Theme.bg)
         .foregroundStyle(Theme.fg)
-        .onAppear { simulators = Simulators.booted() }
+        .environment(sheets)
         .task {
             // For demos and screenshots: open the Rewrite editor on the newest call that has a JSON response.
             guard ProcessInfo.processInfo.environment["RELAY_OPEN_REWRITE"] != nil else { return }
             try? await Task.sleep(for: .seconds(4))
             if let tx = store.transactions.last(where: { $0.responseBodyPreview?.hasPrefix("{") == true }) {
                 var d = RewriteDraft(copying: tx)
-                if let h = tx.responseHeaders.first(where: { $0.name.lowercased() == "content-type" }) {
-                    var step = StepDraft(kind: "set_header"); step.name = "x-env"; step.value = "staging"; _ = h
-                    d.sides[1].steps.append(step)
-                }
                 if let f = jsonLeaves(tx.responseBodyPreview).first(where: { $0.json.first?.isNumber == true }) {
                     var step = StepDraft(kind: "set_json"); step.path = f.path; step.value = "999"
                     d.sides[1].steps.append(step)
                 }
-                rewriting = d
+                sheets.rewriting = d
             }
         }
-        .sheet(isPresented: $showConnect) { ConnectView() }
-        .sheet(isPresented: $showRules) { RulesView() }
-        .sheet(item: $mapLocalFor) { MapLocalView(tx: $0) }
-        .sheet(item: $composing) { ComposeView(draft: $0) }
-        .sheet(item: $dnsFor) { DnsSpoofView(tx: $0) }
-        .sheet(item: $rewriting) { RewriteView(draft: $0) }
-        .sheet(item: Binding(get: { store.paused.first }, set: { _ in })) { BreakpointView(item: $0).id($0.id) }
+        .sheet(isPresented: $sheets.showConnect) { ConnectView() }
+        .sheet(item: $sheets.mapLocalFor) { MapLocalView(tx: $0) }
+        .sheet(item: $sheets.composing) { ComposeView(draft: $0) }
+        .sheet(item: $sheets.dnsFor) { DnsSpoofView(tx: $0) }
+        .sheet(item: $sheets.rewriting) { RewriteView(draft: $0) }
     }
+}
 
-    // MARK: Toolbar
+// MARK: - Header shared by the four screens
 
-    private func toolbar(search: Binding<String>) -> some View {
-        HStack(spacing: 12) {
+struct AppHeader<Trailing: View>: View {
+    @Binding var screen: Screen
+    @ViewBuilder var trailing: Trailing
+
+    var body: some View {
+        HStack(spacing: 14) {
             HStack(spacing: 8) {
-                Image(systemName: "arrow.triangle.swap").foregroundStyle(Theme.accent)
+                Image(systemName: "arrow.triangle.swap").font(.system(size: 15, weight: .semibold)).foregroundStyle(Theme.accent)
                 Text("Relay").font(.system(size: 14, weight: .semibold))
             }
             .padding(.leading, 72)  // clear the traffic-light buttons
-
-            Button(action: { store.isRunning ? store.stop() : store.start() }) {
-                HStack(spacing: 6) {
-                    Circle().fill(store.isRunning ? Theme.s5xx : Theme.faint).frame(width: 8, height: 8)
-                    Text(store.isRunning ? "Recording" : "Start")
-                }
-            }
-            .buttonStyle(PillButtonStyle())
-
-            HStack(spacing: 8) {
-                Image(systemName: "magnifyingglass").foregroundStyle(Theme.muted)
-                TextField("Search: app:AcmeShop host:api status:5xx header:user-agent=…", text: search)
-                    .textFieldStyle(.plain)
-                    .font(Theme.mono)
-            }
-            .padding(.horizontal, 10)
-            .frame(height: 30)
-            .background(RoundedRectangle(cornerRadius: 9).fill(Theme.raised))
-            .overlay(RoundedRectangle(cornerRadius: 9).stroke(Theme.line2))
-            .overlay(RoundedRectangle(cornerRadius: 9).stroke(store.searchError == nil ? Color.clear : Theme.s5xx))
-            .help(store.searchError ?? "Filter language: app: client: host: path: method: status: header:name=value body: duration: size:")
-            .frame(maxWidth: 520)
-
-            sourceMenu
-
-            Button(action: { composing = ComposeDraft() }) {
-                HStack(spacing: 6) {
-                    Image(systemName: "paperplane")
-                    Text("Compose")
-                }
-            }
-            .buttonStyle(PillButtonStyle())
-
-            Button(action: { showRules = true }) {
-                HStack(spacing: 6) {
-                    Image(systemName: "slider.horizontal.3")
-                    Text("Rules")
-                    if store.rules.contains(where: \.enabled) {
-                        Text("\(store.rules.filter(\.enabled).count)").foregroundStyle(Theme.accent)
-                    }
-                }
-            }
-            .buttonStyle(PillButtonStyle())
-
-            Spacer()
-
-            Menu {
-                if simulators.isEmpty {
-                    Text("No booted simulators — boot one in Xcode")
-                }
-                ForEach(simulators) { sim in
-                    Button("Trust Relay CA in \(sim.name) (\(sim.runtime))") { installCA(sim) }
-                }
-                Divider()
-                Button("Refresh simulators") { simulators = Simulators.booted() }
-            } label: {
-                Label("Simulators", systemImage: "iphone")
-            }
-            .menuStyle(.borderlessButton)
-            .fixedSize()
-
-            Button(action: { showConnect = true }) {
-                Label("Connect device", systemImage: "plus.circle.fill")
-            }
-            .buttonStyle(PillButtonStyle())
-
-            Menu {
-                Button("Export HAR…") { exportHAR() }
-                Button("Import HAR…") { importHAR() }
-            } label: {
-                Label("HAR", systemImage: "square.and.arrow.up.on.square")
-            }
-            .menuStyle(.borderlessButton)
-            .fixedSize()
-            .help("Export the requests shown (or all history) as a HAR file, or open a HAR file")
-
-            Button("Clear") { store.clear() }.buttonStyle(PillButtonStyle())
+            PillGroup(items: Screen.allCases, title: { $0.rawValue }, selection: $screen, height: 24, fontSize: 12.5)
+            trailing
         }
-        .padding(.horizontal, 14)
+        .padding(.horizontal, 16)
         .frame(height: 52)
         .background(Theme.panel)
-    }
-
-    private func exportHAR() {
-        let panel = NSSavePanel()
-        panel.allowedContentTypes = [.json]
-        panel.nameFieldStringValue = "relay-traffic.har"
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        do {
-            try store.exportHAR().write(to: url, atomically: true, encoding: .utf8)
-        } catch {
-            store.errorMessage = "Export failed: \(error.localizedDescription)"
-        }
-    }
-
-    private func importHAR() {
-        let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.json, .data]
-        panel.allowsMultipleSelection = false
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        do {
-            let n = try store.importHAR(String(contentsOf: url, encoding: .utf8))
-            store.status = "Imported \(n) request\(n == 1 ? "" : "s") from \(url.lastPathComponent)"
-        } catch {
-            store.errorMessage = "Import failed: \(error)"
-        }
-    }
-
-    private var sourceMenu: some View {
-        Menu {
-            Button("All traffic") { store.source = nil }
-            let procs = store.processesSeen
-            if !procs.isEmpty { Divider() }
-            ForEach(procs, id: \.name) { p in
-                Button("\(p.name)  (\(p.count))") { store.source = "app:\(p.name.contains(" ") ? "\"\(p.name)\"" : p.name)" }
-            }
-        } label: {
-            HStack(spacing: 5) {
-                Image(systemName: "app.dashed")
-                Text(store.source.map { $0.replacingOccurrences(of: "app:", with: "") } ?? "All apps")
-                    .lineLimit(1)
-            }
-            .foregroundStyle(store.source == nil ? Theme.muted : Theme.accent)
-        }
-        .menuStyle(.borderlessButton)
-        .fixedSize()
-        .help("Only show requests from one program on this Mac (the iOS Simulator app, a browser, …)")
-    }
-
-    private func installCA(_ sim: BootedSimulator) {
-        do {
-            try Simulators.installCA(udid: sim.id, certPath: store.caPath)
-            simMessage = "Relay CA trusted in \(sim.name)"
-        } catch {
-            simMessage = "Could not install CA: \(error.localizedDescription)"
-        }
-    }
-
-    // MARK: List
-
-    private var trafficList: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 10) {
-                Text("STATUS").frame(width: 58, alignment: .leading)
-                Text("METHOD").frame(width: 64, alignment: .leading)
-                Text("URL").frame(maxWidth: .infinity, alignment: .leading)
-                Text("APP").frame(width: 110, alignment: .leading)
-                Text("DURATION").frame(width: 120, alignment: .leading)
-                Text("SIZE").frame(width: 70, alignment: .trailing)
-            }
-            .font(.system(size: 11, weight: .semibold))
-            .foregroundStyle(Theme.faint)
-            .padding(.horizontal, 14)
-            .frame(height: 30)
-            Divider().overlay(Theme.line)
-
-            if store.transactions.isEmpty {
-                EmptyStateView(port: store.port, caPath: store.caPath)
-            } else {
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        LazyVStack(spacing: 0) {
-                            ForEach(store.filtered) { tx in
-                                TrafficRow(tx: tx, selected: tx.id == store.selection, kinds: tx.appliedRules.map { store.ruleKind($0) })
-                                    .contentShape(Rectangle())
-                                    .onTapGesture { store.selection = tx.id }
-                                    .contextMenu { ruleMenu(for: tx) }
-                                    .id(tx.id)
-                            }
-                        }
-                    }
-                    .onChange(of: store.transactions.count) {
-                        if store.selection == nil, let last = store.filtered.last { proxy.scrollTo(last.id, anchor: .bottom) }
-                    }
-                }
-            }
-        }
-        .frame(maxWidth: .infinity)
-    }
-
-    @ViewBuilder
-    private func ruleMenu(for tx: FfiTransaction) -> some View {
-        Button("Rewrite this call…") { rewriting = RewriteDraft(copying: tx) }
-        Divider()
-        Button("Repeat") { store.repeatNow(tx) }
-        Button("Edit & Repeat…") { composing = ComposeDraft(copying: tx) }
-        Divider()
-        Button("Breakpoint on \(tx.host)\(tx.path.split(separator: "?").first.map { String($0) } ?? "")") { store.addQuickRule("breakpoint", for: tx) }
-        Button("Block this request") { store.addQuickRule("block", for: tx) }
-        Button("Map local to a file…") { mapLocalFor = tx }
-        Button("Send \(tx.host) to another address…") { dnsFor = tx }
-        Divider()
-        Button("Throttle to 3G") { store.addQuickRule("throttle-3g", for: tx) }
-        Button("Make it fail (offline)") { store.addQuickRule("offline", for: tx) }
-    }
-
-    private var footer: some View {
-        HStack(spacing: 16) {
-            Text("\(store.filtered.count) of \(store.transactions.count) requests")
-            Text("\(store.transactions.filter { $0.state == .failed || ($0.status ?? 0) >= 500 }.count) failing")
-                .foregroundStyle(Theme.s5xx)
-            if let simMessage { Text(simMessage).foregroundStyle(Theme.accent) }
-            if let m = store.ruleMessage { Text(m).foregroundStyle(Theme.s5xx).lineLimit(1) }
-            if let err = store.errorMessage { Text(err).foregroundStyle(Theme.s5xx).lineLimit(1) }
-            Spacer()
-            Text(store.status)
-        }
-        .font(.system(size: 11.5))
-        .foregroundStyle(Theme.muted)
-        .padding(.horizontal, 14)
-        .frame(height: 28)
-        .background(Theme.panel)
-    }
-}
-
-// MARK: - Rows
-
-struct TrafficRow: View {
-    let tx: FfiTransaction
-    let selected: Bool
-    var kinds: [String] = []
-
-    var body: some View {
-        HStack(spacing: 10) {
-            StatusPill(tx: tx).frame(width: 58, alignment: .leading)
-            Text(tx.method)
-                .font(Theme.monoSmall)
-                .foregroundStyle(tx.method == "GET" ? Theme.muted : Theme.accent)
-                .frame(width: 64, alignment: .leading)
-            HStack(spacing: 6) {
-                if tx.decrypted {
-                    Image(systemName: "lock.open.fill").font(.system(size: 9)).foregroundStyle(Theme.s2xx)
-                } else if tx.scheme == "https" {
-                    Image(systemName: "lock.fill").font(.system(size: 9)).foregroundStyle(Theme.faint)
-                }
-                Text(tx.host).foregroundStyle(Theme.muted)
-                Text(tx.path).foregroundStyle(Theme.fg)
-                ForEach(Array(Set(kinds.filter { !$0.isEmpty })).sorted(), id: \.self) { k in
-                    Image(systemName: RuleBadge.symbol(k)).font(.system(size: 10)).foregroundStyle(Theme.paused)
-                        .help("Rule applied: \(k)")
-                }
-            }
-            .font(Theme.mono)
-            .lineLimit(1)
-            .truncationMode(.middle)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            Text(tx.clientProcess ?? "")
-                .font(Theme.monoSmall)
-                .foregroundStyle(Theme.muted)
-                .lineLimit(1)
-                .frame(width: 110, alignment: .leading)
-            DurationBar(ms: tx.durationMs).frame(width: 120)
-            Text(formatBytes(tx.responseBodySize))
-                .font(Theme.mono)
-                .foregroundStyle(Theme.muted)
-                .frame(width: 70, alignment: .trailing)
-        }
-        .padding(.horizontal, 14)
-        .frame(height: 30)
-        .background(selected ? Theme.selection : (isError ? Theme.s5xx.opacity(0.05) : .clear))
-        .overlay(alignment: .leading) { if selected { Rectangle().fill(Theme.accent).frame(width: 2) } }
         .overlay(alignment: .bottom) { Rectangle().fill(Theme.line).frame(height: 1) }
     }
-
-    private var isError: Bool { tx.state == .failed || (tx.status ?? 0) >= 500 }
 }
+
+// MARK: - Shared row pieces
 
 struct StatusPill: View {
     let tx: FfiTransaction
+    var large = false
     var body: some View {
         Text(label)
-            .font(Theme.monoSmall)
+            .font(.system(size: large ? 12 : 11, weight: large ? .bold : .semibold, design: .monospaced))
             .foregroundStyle(color)
-            .padding(.horizontal, 7)
-            .padding(.vertical, 2)
-            .background(RoundedRectangle(cornerRadius: 5).fill(color.opacity(0.14)))
+            .padding(.horizontal, large ? 8 : 7)
+            .padding(.vertical, large ? 3 : 2)
+            .background(RoundedRectangle(cornerRadius: large ? 6 : 5).fill(color.opacity(large ? 0.16 : 0.14)))
     }
     private var label: String {
         switch tx.state {
@@ -370,16 +125,9 @@ struct DurationBar: View {
     let ms: UInt64
     var body: some View {
         HStack(spacing: 8) {
-            GeometryReader { geo in
-                ZStack(alignment: .leading) {
-                    Capsule().fill(Theme.line)
-                    Capsule().fill(ms > 800 ? Theme.s4xx : Theme.accent)
-                        .frame(width: max(2, geo.size.width * min(1, Double(ms) / 2000)))
-                }
-            }
-            .frame(height: 4)
-            Text(formatMs(ms))
-                .font(Theme.mono)
+            MeterBar(fraction: Double(ms) / 2000, color: ms > 800 ? Theme.s4xx : Theme.accent, height: 4)
+            Text(ms == 0 ? "—" : formatMs(ms))
+                .font(.system(size: 11.5, design: .monospaced))
                 .foregroundStyle(ms > 800 ? Theme.s4xx : Theme.fg)
                 .frame(width: 54, alignment: .trailing)
         }
@@ -411,7 +159,7 @@ struct EmptyStateView: View {
                     .padding(10)
                     .background(RoundedRectangle(cornerRadius: 8).fill(Theme.raised))
             }
-            Text("iOS Simulator: use Simulators → Trust Relay CA, then set this Mac's HTTP/HTTPS proxy to 127.0.0.1:\(port.map(String.init) ?? "8888").")
+            Text("iOS Simulator: use Connect device, or set this Mac's HTTP/HTTPS proxy to 127.0.0.1:\(port.map(String.init) ?? "8888").")
                 .foregroundStyle(Theme.muted)
         }
         .padding(28)

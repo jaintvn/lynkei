@@ -1,46 +1,32 @@
 import RelayKit
 import SwiftUI
 
+/// The right-hand panel: summary, quick actions and the Overview / Request / Response / Timing tabs.
 struct InspectorView: View {
     let tx: FfiTransaction?
     @Environment(TrafficStore.self) private var store
-    @State private var tab = "Response"
+    @Environment(Sheets.self) private var sheets
+    @State private var tab = "Overview"
+
+    private let tabs = ["Overview", "Request", "Response", "Timing"]
 
     var body: some View {
         if let tx {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
-                    header(tx)
-                    facts(tx)
-                    if let error = tx.error {
-                        Label(error, systemImage: "exclamationmark.triangle.fill")
-                            .font(.system(size: 12))
-                            .foregroundStyle(tx.state == .failed ? Theme.s5xx : Theme.muted)
-                            .padding(12)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(RoundedRectangle(cornerRadius: 10).fill(Theme.s5xx.opacity(0.08)))
-                    }
-                    EndpointRules(tx: tx)
-                    Picker("", selection: $tab) {
-                        Text("Request").tag("Request")
-                        Text("Response").tag("Response")
-                    }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-                    let isRequest = tab == "Request"
-                    section("Headers") {
-                        HeadersView(headers: isRequest ? tx.requestHeaders : tx.responseHeaders)
-                    }
-                    section("Body") {
-                        BodyView(tx: tx, isRequest: isRequest)
-                    }
-                    if !tx.websocketMessages.isEmpty {
-                        section("WebSocket · \(tx.websocketMessages.count) messages") {
-                            WebSocketView(messages: tx.websocketMessages)
+            VStack(spacing: 0) {
+                header(tx)
+                tabBar
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 18) {
+                        switch tab {
+                        case "Request": messageTab(tx, isRequest: true)
+                        case "Response": messageTab(tx, isRequest: false)
+                        case "Timing": timing(tx)
+                        default: overview(tx)
                         }
                     }
+                    .padding(.horizontal, 18)
+                    .padding(.vertical, 16)
                 }
-                .padding(18)
             }
         } else {
             VStack(spacing: 8) {
@@ -51,45 +37,164 @@ struct InspectorView: View {
         }
     }
 
+    // MARK: Header and tabs
+
     private func header(_ tx: FfiTransaction) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
-                StatusPill(tx: tx)
-                Text(tx.method).font(Theme.monoSmall).foregroundStyle(Theme.accent)
-                Text(tx.path).font(.system(size: 13, weight: .medium, design: .monospaced)).lineLimit(2)
+                StatusPill(tx: tx, large: true)
+                Text(tx.method).font(.system(size: 13, weight: .semibold, design: .monospaced)).foregroundStyle(methodColor(tx.method))
+                Text(tx.state == .tunneled ? "\(tx.host):\(tx.port)" : tx.path)
+                    .font(.system(size: 13, weight: .medium, design: .monospaced))
+                    .lineLimit(1).truncationMode(.middle)
             }
-            Text("\(tx.host) · \(tx.clientAddr)").font(.system(size: 12)).foregroundStyle(Theme.muted)
-            HStack(spacing: 6) {
-                Button("Copy URL") { copy(tx.url) }
-                Button("Copy as cURL") { copy(curl(tx)) }
+            Text("\(tx.host) · \(Analytics.deviceLabel(tx)) · \(clock(tx.startedAtMs))")
+                .font(.system(size: 12)).foregroundStyle(Theme.muted).lineLimit(1)
+            FlowLayout(spacing: 6) {
+                Button { store.addQuickRule("breakpoint", for: tx) } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "pause.circle").font(.system(size: 12, weight: .semibold))
+                        Text("Breakpoint")
+                        Text("⌘B").opacity(0.7).fontWeight(.medium)
+                    }
+                }
+                .buttonStyle(AccentButtonStyle())
+                .keyboardShortcut("b", modifiers: .command)
+                .help("Pause the next call like this one so you can edit it")
+                small("Map Local") { sheets.mapLocalFor = tx }
+                small("Rewrite") { sheets.rewriting = RewriteDraft(copying: tx) }
+                small("Repeat") { store.repeatNow(tx) }
+                small("Copy cURL") { copy(curl(tx)) }
             }
-            .buttonStyle(PillButtonStyle())
+        }
+        .padding(.horizontal, 18)
+        .padding(.top, 16).padding(.bottom, 12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .overlay(alignment: .bottom) { Rectangle().fill(Theme.line).frame(height: 1) }
+    }
+
+    private func small(_ title: String, action: @escaping () -> Void) -> some View {
+        Button(title, action: action).buttonStyle(PillButtonStyle()).font(.system(size: 12, weight: .medium))
+    }
+
+    private var tabBar: some View {
+        HStack(spacing: 18) {
+            ForEach(tabs, id: \.self) { t in
+                Button { tab = t } label: {
+                    Text(t)
+                        .font(.system(size: 12.5, weight: .medium))
+                        .foregroundStyle(tab == t ? Theme.fg : Theme.muted)
+                        .frame(height: 38)
+                        .overlay(alignment: .bottom) { if tab == t { Rectangle().fill(Theme.accent).frame(height: 2) } }
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+            Spacer()
+        }
+        .padding(.horizontal, 18)
+        .overlay(alignment: .bottom) { Rectangle().fill(Theme.line).frame(height: 1) }
+    }
+
+    // MARK: Tabs
+
+    @ViewBuilder
+    private func overview(_ tx: FfiTransaction) -> some View {
+        facts(tx)
+        timing(tx)
+        section("Response body") { BodyView(tx: tx, isRequest: false) }
+        if Analytics.isError(tx) { failing(tx) }
+        if let error = tx.error, tx.state == .failed {
+            callout(title: "The call failed", text: error)
+        }
+        EndpointRules(tx: tx)
+        if !tx.websocketMessages.isEmpty {
+            section("WebSocket · \(tx.websocketMessages.count) messages") { WebSocketView(messages: tx.websocketMessages) }
         }
     }
 
+    @ViewBuilder
+    private func messageTab(_ tx: FfiTransaction, isRequest: Bool) -> some View {
+        section("Headers") { HeadersView(headers: isRequest ? tx.requestHeaders : tx.responseHeaders) }
+        section(isRequest ? "Request body" : "Response body") { BodyView(tx: tx, isRequest: isRequest) }
+    }
+
     private func facts(_ tx: FfiTransaction) -> some View {
-        let items: [(String, String)] = [
-            ("Duration", formatMs(tx.durationMs)),
-            ("Response", formatBytes(tx.responseBodySize)),
-            ("Request", formatBytes(tx.requestBodySize)),
-            ("TLS", tx.decrypted ? "Decrypted" : (tx.scheme == "https" ? "Encrypted" : "None")),
-            ("State", "\(tx.state)".capitalized),
-            ("Protocol", protocolLabel(tx)),
+        let items: [(String, String, Color)] = [
+            ("Duration", tx.durationMs == 0 ? "—" : formatMs(tx.durationMs), tx.durationMs > 800 ? Theme.s4xx : Theme.fg),
+            ("Size", formatBytes(tx.responseBodySize), Theme.fg),
+            ("Protocol", protocolLabel(tx), Theme.fg),
+            ("TLS", tx.decrypted ? "Decrypted" : (tx.scheme == "https" ? "Tunnel" : "None"), Theme.fg),
+            ("Remote", "\(tx.host):\(tx.port)", Theme.fg),
+            ("API", Analytics.apiVersion(tx.path) ?? "—", Theme.fg),
         ]
         return LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 1), count: 3), spacing: 1) {
-            ForEach(items, id: \.0) { k, v in
+            ForEach(items, id: \.0) { k, v, c in
                 VStack(alignment: .leading, spacing: 3) {
                     Text(k).font(.system(size: 11)).foregroundStyle(Theme.faint)
-                    Text(v).font(Theme.mono)
+                    Text(v).font(.system(size: 12.5, weight: .medium, design: .monospaced)).foregroundStyle(c).lineLimit(1).truncationMode(.middle)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(10)
+                .padding(.horizontal, 12).padding(.vertical, 10)
                 .background(Theme.panel)
             }
         }
         .background(Theme.line)
         .clipShape(RoundedRectangle(cornerRadius: 10))
         .overlay(RoundedRectangle(cornerRadius: 10).stroke(Theme.line))
+    }
+
+    /// Relay measures the whole exchange; the split into DNS / connect / TLS is not captured yet.
+    private func timing(_ tx: FfiTransaction) -> some View {
+        section("Timing") {
+            VStack(spacing: 8) {
+                timingRow("Total", ms: tx.durationMs, of: max(tx.durationMs, 1), color: tx.durationMs > 800 ? Theme.s4xx : Theme.accent)
+                timingRow("Request", ms: nil, size: tx.requestBodySize)
+                timingRow("Response", ms: nil, size: tx.responseBodySize)
+            }
+        }
+    }
+
+    private func timingRow(_ label: String, ms: UInt64?, of total: UInt64 = 1, color: Color = Theme.s3xx, size: UInt64? = nil) -> some View {
+        HStack(spacing: 10) {
+            Text(label).font(.system(size: 11.5)).foregroundStyle(Theme.muted).frame(width: 64, alignment: .leading)
+            if let ms {
+                MeterBar(fraction: Double(ms) / Double(total), color: color, height: 8)
+                Text(ms == 0 ? "—" : formatMs(ms)).font(.system(size: 11.5, design: .monospaced)).frame(width: 64, alignment: .trailing)
+            } else {
+                Spacer()
+                Text(size.map(formatBytes) ?? "—").font(.system(size: 11.5, design: .monospaced)).frame(width: 64, alignment: .trailing)
+            }
+        }
+    }
+
+    private func failing(_ tx: FfiTransaction) -> some View {
+        let key = Analytics.foldPath(tx.path)
+        let recent = store.transactions.filter { $0.host == tx.host && $0.method == tx.method && Analytics.foldPath($0.path) == key }.suffix(6)
+        let bad = recent.filter(Analytics.isError).count
+        return callout(
+            title: "Failing \(bad) of the last \(recent.count) calls",
+            text: tx.error ?? "\(tx.method) \(key) on \(tx.host) answered \(tx.status.map(String.init) ?? "with an error").")
+    }
+
+    private func callout(title: String, text: String) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "exclamationmark.circle").foregroundStyle(Theme.s5xx).font(.system(size: 15))
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title).font(.system(size: 12, weight: .semibold))
+                Text(text).font(.system(size: 12)).foregroundStyle(Theme.muted)
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Theme.s5xx.opacity(0.10)))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Theme.s5xx.opacity(0.30)))
+    }
+
+    private func clock(_ ms: UInt64) -> String {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm:ss.SSS"
+        return f.string(from: Date(timeIntervalSince1970: Double(ms) / 1000))
     }
 
     /// "HTTP/2", or "HTTP/1.1 → HTTP/2" when the app and the server legs differ.
@@ -120,6 +225,7 @@ struct InspectorView: View {
     }
 }
 
+
 struct HeadersView: View {
     let headers: [FfiHeader]
     var body: some View {
@@ -129,7 +235,7 @@ struct HeadersView: View {
             }
             ForEach(Array(headers.enumerated()), id: \.offset) { _, h in
                 HStack(alignment: .top, spacing: 10) {
-                    Text(h.name).foregroundStyle(Color(hex: 0x9CB4FF)).frame(width: 150, alignment: .leading)
+                    Text(h.name).foregroundStyle(Theme.key).frame(width: 150, alignment: .leading)
                     Text(h.value).foregroundStyle(Theme.fg).textSelection(.enabled)
                 }
                 .font(.system(size: 11.5, design: .monospaced))

@@ -41,6 +41,8 @@ final class TrafficStore {
     // MARK: Rules and breakpoints
 
     func refreshRules() { if let e = engine { rules = e.listRules() } }
+    func rulesFor(_ tx: FfiTransaction) -> [FfiRule] { engine?.rulesFor(request: tx) ?? [] }
+    func ruleKind(_ id: String) -> String { rules.first { $0.id == id }?.kind ?? "" }
     func rulesYAML() -> String { engine?.rulesYaml() ?? "" }
     func applyRulesYAML(_ yaml: String) -> [String] {
         let problems = engine?.setRules(yaml: yaml) ?? ["Relay is not running"]

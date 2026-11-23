@@ -3,6 +3,7 @@ import SwiftUI
 
 struct InspectorView: View {
     let tx: FfiTransaction?
+    @Environment(TrafficStore.self) private var store
     @State private var tab = "Response"
 
     var body: some View {
@@ -19,6 +20,7 @@ struct InspectorView: View {
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .background(RoundedRectangle(cornerRadius: 10).fill(Theme.s5xx.opacity(0.08)))
                     }
+                    EndpointRules(tx: tx)
                     Picker("", selection: $tab) {
                         Text("Request").tag("Request")
                         Text("Response").tag("Response")
@@ -196,5 +198,67 @@ struct WebSocketView: View {
             }
         }
         .background(RoundedRectangle(cornerRadius: 10).fill(Theme.raised))
+    }
+}
+
+/// The rules that fit this endpoint, each with its on/off switch.
+struct EndpointRules: View {
+    @Environment(TrafficStore.self) private var store
+    let tx: FfiTransaction
+
+    var body: some View {
+        // `store.rules` is read so the list refreshes when a rule is switched.
+        let matching = store.rules.isEmpty ? [] : store.rulesFor(tx)
+        if !matching.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("RULES FOR THIS ENDPOINT").font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.faint)
+                ForEach(matching, id: \.id) { r in
+                    HStack(spacing: 8) {
+                        Image(systemName: RuleBadge.symbol(r.kind))
+                            .foregroundStyle(r.enabled ? Theme.paused : Theme.faint)
+                            .frame(width: 16)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text("\(r.kind.capitalized) · \(r.id)").font(.system(size: 12.5))
+                            Text(r.enabled ? ruleHelp(r.kind) : "Off — not applied")
+                                .font(.system(size: 11)).foregroundStyle(Theme.muted)
+                        }
+                        Spacer()
+                        Toggle("", isOn: Binding(get: { r.enabled }, set: { store.setRule(r.id, enabled: $0) }))
+                            .labelsHidden().toggleStyle(.switch).controlSize(.small)
+                    }
+                }
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: 10).fill(Theme.raised))
+            .overlay(RoundedRectangle(cornerRadius: 10).stroke(Theme.line2))
+        }
+    }
+
+    private func ruleHelp(_ kind: String) -> String {
+        switch kind {
+        case "breakpoint": return "On — the next matching call pauses so you can edit it"
+        case "block": return "On — matching calls are refused"
+        case "map local": return "On — answered from a local file"
+        case "map remote": return "On — sent to another server"
+        case "rewrite": return "On — edited on the way through"
+        case "throttle": return "On — slowed or dropped"
+        default: return "On"
+        }
+    }
+}
+
+/// Small marker on a row in the list when rules changed or held that call.
+enum RuleBadge {
+    static func symbol(_ kind: String) -> String {
+        switch kind {
+        case "breakpoint": return "pause.circle.fill"
+        case "block": return "nosign"
+        case "map local": return "doc.fill"
+        case "map remote": return "arrow.triangle.branch"
+        case "rewrite": return "pencil.circle.fill"
+        case "throttle": return "tortoise.fill"
+        default: return "slider.horizontal.3"
+        }
     }
 }

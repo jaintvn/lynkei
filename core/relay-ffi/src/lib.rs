@@ -670,6 +670,30 @@ impl RelayEngine {
             .collect()
     }
 
+    /// Every rule whose match fits this request, switched on or off (so the UI can show which
+    /// settings apply to an endpoint and which are disabled).
+    pub fn rules_for(&self, request: FfiTransaction) -> Vec<FfiRule> {
+        let t = Transaction::from(&request);
+        self.current_rules()
+            .rules
+            .iter()
+            .filter(|r| {
+                r.matcher
+                    .matches_request(&t.method, &t.scheme, &t.host, &t.path)
+                    && r.matcher.filter.as_deref().is_none_or(|f| {
+                        relay_model::filter::Filter::parse(f).is_ok_and(|f| f.matches(&t))
+                    })
+            })
+            .map(|r| FfiRule {
+                id: r.id.clone(),
+                name: r.name.clone(),
+                enabled: r.enabled,
+                kind: rule_kind(&r.action).into(),
+                summary: rule_summary(r),
+            })
+            .collect()
+    }
+
     pub fn set_rule_enabled(&self, id: String, enabled: bool) -> Result<(), RelayError> {
         let mut set = self.current_rules();
         let rule = set

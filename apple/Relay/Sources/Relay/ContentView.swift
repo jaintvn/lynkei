@@ -160,7 +160,7 @@ struct ContentView: View {
                     ScrollView {
                         LazyVStack(spacing: 0) {
                             ForEach(store.filtered) { tx in
-                                TrafficRow(tx: tx, selected: tx.id == store.selection)
+                                TrafficRow(tx: tx, selected: tx.id == store.selection, kinds: tx.appliedRules.map { store.ruleKind($0) })
                                     .contentShape(Rectangle())
                                     .onTapGesture { store.selection = tx.id }
                                     .contextMenu { ruleMenu(for: tx) }
@@ -212,6 +212,7 @@ struct ContentView: View {
 struct TrafficRow: View {
     let tx: FfiTransaction
     let selected: Bool
+    var kinds: [String] = []
 
     var body: some View {
         HStack(spacing: 10) {
@@ -228,6 +229,10 @@ struct TrafficRow: View {
                 }
                 Text(tx.host).foregroundStyle(Theme.muted)
                 Text(tx.path).foregroundStyle(Theme.fg)
+                ForEach(Array(Set(kinds.filter { !$0.isEmpty })).sorted(), id: \.self) { k in
+                    Image(systemName: RuleBadge.symbol(k)).font(.system(size: 10)).foregroundStyle(Theme.paused)
+                        .help("Rule applied: \(k)")
+                }
             }
             .font(Theme.mono)
             .lineLimit(1)

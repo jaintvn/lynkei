@@ -31,6 +31,7 @@ use tokio::sync::oneshot;
 use tokio_rustls::TlsAcceptor;
 
 use crate::body::{body_preview, strip_hop_by_hop};
+use crate::breakpoints::{BreakPhase, Breakpoints, Decision, Paused};
 use crate::ca::{CertAuthority, SniResolver};
 use crate::rules::{self, Early, RulesHook};
 use crate::sniff;
@@ -58,6 +59,7 @@ pub(crate) struct Shared {
     procs: Arc<ProcCache>,
     listen_port: u16,
     rules: RulesHook,
+    breaks: Breakpoints,
 }
 
 /// Client port → program, filled from `lsof` snapshots (see `procinfo`).
@@ -178,6 +180,28 @@ impl ProxyHandle {
         self.shared.rules.set(rules::ActiveRules::new(set, base));
     }
 
+    /// Requests and responses currently held at a breakpoint.
+    pub fn paused(&self) -> Vec<Paused> {
+        self.shared.breaks.list()
+    }
+
+    /// Releases a held message, optionally edited. False if it is no longer held.
+    pub fn resume(
+        &self,
+        tx_id: u64,
+        phase: BreakPhase,
+        edit: Option<crate::breakpoints::Edit>,
+    ) -> bool {
+        self.shared
+            .breaks
+            .decide(tx_id, phase, Decision::Resume(edit))
+    }
+
+    /// Cancels a held message: the app gets an error instead.
+    pub fn abort(&self, tx_id: u64, phase: BreakPhase) -> bool {
+        self.shared.breaks.decide(tx_id, phase, Decision::Abort)
+    }
+
     pub fn shutdown(&mut self) {
         if let Some(tx) = self.shutdown.take() {
             let _ = tx.send(());
@@ -253,6 +277,7 @@ pub async fn start(cfg: ProxyConfig, sink: Arc<dyn EventSink>) -> Result<ProxyHa
         procs,
         listen_port: local_addr.port(),
         rules: RulesHook::default(),
+        breaks: Breakpoints::default(),
     });
     let (tx, mut rx) = oneshot::channel();
 
@@ -740,6 +765,58 @@ async fn forward(
         }
         t.request_headers = to_headers(&headers);
     }
+    if let Some(rule) = active.breakpoint(&matched, relay_model::rules::Phase::Request) {
+        note(&mut applied, &rule);
+        let held = match body.collect().await {
+            Ok(c) => c.to_bytes(),
+            Err(e) => {
+                return fail(
+                    shared,
+                    t,
+                    started,
+                    StatusCode::BAD_REQUEST,
+                    format!("reading request body: {e}"),
+                );
+            }
+        };
+        let mut open = t.clone();
+        open.state = TransactionState::InProgress;
+        open.applied_rules = applied.clone();
+        shared.sink.on_transaction(open);
+        let (shown_headers, shown_body) = editable(&headers, &held);
+        let decision = shared
+            .breaks
+            .pause(Paused {
+                tx_id: t.id,
+                phase: BreakPhase::Request,
+                rule,
+                method: t.method.clone(),
+                url: t.url(),
+                status: None,
+                headers: to_headers(&shown_headers),
+                body: shown_body,
+            })
+            .await;
+        match decision {
+            Decision::Abort => {
+                t.applied_rules = applied;
+                return fail(
+                    shared,
+                    t,
+                    started,
+                    StatusCode::BAD_GATEWAY,
+                    "request aborted at a breakpoint".into(),
+                );
+            }
+            Decision::Resume(None) => body = full(held),
+            Decision::Resume(Some(edit)) => {
+                headers = from_headers(&edit.headers);
+                headers.insert(header::CONTENT_LENGTH, HeaderValue::from(edit.body.len()));
+                body = full(Bytes::from(edit.body));
+                t.request_headers = to_headers(&headers);
+            }
+        }
+    }
     let (mut target_scheme, mut target_authority, mut target_path) =
         (scheme.to_owned(), authority.clone(), path.clone());
     let mut keep_host = None;
@@ -865,6 +942,62 @@ async fn forward(
         let wait = rules::edit_delay(&resp_edits);
         if !wait.is_zero() {
             tokio::time::sleep(wait).await;
+        }
+    }
+    if let Some(rule) = active.breakpoint(&matched, relay_model::rules::Phase::Response) {
+        note(&mut applied, &rule);
+        let held = match rbody.collect().await {
+            Ok(c) => c.to_bytes(),
+            Err(e) => {
+                return fail(
+                    shared,
+                    t,
+                    started,
+                    StatusCode::BAD_GATEWAY,
+                    format!("reading response body: {e}"),
+                );
+            }
+        };
+        let mut open = t.clone();
+        open.state = TransactionState::InProgress;
+        open.applied_rules = applied.clone();
+        shared.sink.on_transaction(open);
+        let (shown_headers, shown_body) = editable(&rparts.headers, &held);
+        let decision = shared
+            .breaks
+            .pause(Paused {
+                tx_id: t.id,
+                phase: BreakPhase::Response,
+                rule,
+                method: t.method.clone(),
+                url: t.url(),
+                status: Some(rparts.status.as_u16()),
+                headers: to_headers(&shown_headers),
+                body: shown_body,
+            })
+            .await;
+        match decision {
+            Decision::Abort => {
+                t.applied_rules = applied;
+                return fail(
+                    shared,
+                    t,
+                    started,
+                    StatusCode::BAD_GATEWAY,
+                    "response aborted at a breakpoint".into(),
+                );
+            }
+            Decision::Resume(None) => rbody = full(held),
+            Decision::Resume(Some(edit)) => {
+                rparts.headers = from_headers(&edit.headers);
+                rparts
+                    .headers
+                    .insert(header::CONTENT_LENGTH, HeaderValue::from(edit.body.len()));
+                if let Some(s) = edit.status.and_then(|s| StatusCode::from_u16(s).ok()) {
+                    rparts.status = s;
+                }
+                rbody = full(Bytes::from(edit.body));
+            }
         }
     }
     if let Some((_, th)) = &throttle {
@@ -1277,6 +1410,34 @@ fn base_transaction(
         client_process: None,
         applied_rules: vec![],
     }
+}
+
+/// Headers and body as the editor shows them: a gzip/deflate body is shown decoded (and the
+/// encoding headers dropped), since an edited body is sent uncompressed.
+fn editable(headers: &HeaderMap, body: &Bytes) -> (HeaderMap, Vec<u8>) {
+    let mut h = headers.clone();
+    match crate::body::decode_body(headers, body, rules::MAX_REWRITE_BODY) {
+        Some(plain) if headers.contains_key(header::CONTENT_ENCODING) => {
+            h.remove(header::CONTENT_ENCODING);
+            h.insert(header::CONTENT_LENGTH, HeaderValue::from(plain.len()));
+            (h, plain)
+        }
+        Some(plain) => (h, plain),
+        None => (h, body.to_vec()),
+    }
+}
+
+fn from_headers(list: &[Header]) -> HeaderMap {
+    let mut m = HeaderMap::new();
+    for h in list {
+        if let (Ok(n), Ok(v)) = (
+            HeaderName::from_bytes(h.name.as_bytes()),
+            HeaderValue::from_str(&h.value),
+        ) {
+            m.append(n, v);
+        }
+    }
+    m
 }
 
 fn to_headers(map: &HeaderMap) -> Vec<Header> {

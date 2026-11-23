@@ -172,6 +172,16 @@ impl ActiveRules {
         })
     }
 
+    /// The first matching `breakpoint` rule for this phase.
+    pub fn breakpoint(&self, matched: &[&Rule], phase: Phase) -> Option<String> {
+        matched.iter().find_map(|r| match &r.action {
+            RuleAction::Breakpoint { phase: p } if *p == phase || *p == Phase::Both => {
+                Some(r.id.clone())
+            }
+            _ => None,
+        })
+    }
+
     /// Network conditions to impose on the response of the first matching throttle rule.
     pub fn throttle(&self, matched: &[&Rule]) -> Option<(String, Throttle)> {
         matched.iter().find_map(|r| match &r.action {

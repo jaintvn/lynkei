@@ -291,6 +291,81 @@ pub struct VpnStats {
     pub quic_blocked: u64,
 }
 
+fn phase_of(response: bool) -> relay_proxy::breakpoints::BreakPhase {
+    if response {
+        relay_proxy::breakpoints::BreakPhase::Response
+    } else {
+        relay_proxy::breakpoints::BreakPhase::Request
+    }
+}
+
+fn rule_kind(a: &relay_model::rules::RuleAction) -> &'static str {
+    use relay_model::rules::RuleAction::*;
+    match a {
+        Rewrite { .. } => "rewrite",
+        MapLocal { .. } => "map local",
+        MapRemote { .. } => "map remote",
+        Breakpoint { .. } => "breakpoint",
+        Block { .. } => "block",
+        Throttle { .. } => "throttle",
+    }
+}
+
+fn rule_summary(r: &relay_model::rules::Rule) -> String {
+    let m = &r.matcher;
+    let mut parts = vec![];
+    if let Some(x) = &m.method {
+        parts.push(x.clone());
+    }
+    if let Some(x) = &m.host {
+        parts.push(x.clone());
+    }
+    if let Some(x) = &m.path {
+        parts.push(x.clone());
+    }
+    if let Some(x) = &m.filter {
+        parts.push(format!("[{x}]"));
+    }
+    if parts.is_empty() {
+        "every request".into()
+    } else {
+        parts.join(" ")
+    }
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiRule {
+    pub id: String,
+    pub name: String,
+    pub enabled: bool,
+    pub kind: String,
+    /// What it matches, e.g. `GET api.acme.com /v2/products`.
+    pub summary: String,
+}
+
+/// A request or response held at a breakpoint.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiPaused {
+    pub tx_id: u64,
+    /// True for a response, false for a request.
+    pub response: bool,
+    pub rule: String,
+    pub method: String,
+    pub url: String,
+    pub status: Option<u16>,
+    pub headers: Vec<FfiHeader>,
+    pub body: String,
+    /// False for binary bodies, which cannot be edited as text.
+    pub body_is_text: bool,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiEdit {
+    pub status: Option<u16>,
+    pub headers: Vec<FfiHeader>,
+    pub body: String,
+}
+
 fn load_rules(dir: &std::path::Path) -> Option<relay_model::rules::RuleSet> {
     let text = std::fs::read_to_string(dir.join("rules.yaml")).ok()?;
     let set = relay_model::rules::RuleSet::from_yaml(&text).ok()?;
@@ -305,6 +380,30 @@ pub struct RelayEngine {
     vpn: Mutex<Option<relay_netstack::VpnCapture>>,
     store: Mutex<Option<Arc<relay_store::Store>>>,
     devices: Arc<relay_devices::DeviceManager>,
+}
+
+impl RelayEngine {
+    fn current_rules(&self) -> relay_model::rules::RuleSet {
+        load_rules(&self.data_dir).unwrap_or(relay_model::rules::RuleSet {
+            version: relay_model::rules::RULES_VERSION,
+            rules: vec![],
+        })
+    }
+
+    /// Saves `rules.yaml` (the given text, or the set re-serialised) and applies it live.
+    fn save_rules(
+        &self,
+        set: relay_model::rules::RuleSet,
+        yaml: Option<String>,
+    ) -> Result<(), String> {
+        let yaml = yaml.unwrap_or_else(|| set.to_yaml());
+        std::fs::write(self.data_dir.join("rules.yaml"), yaml)
+            .map_err(|e| format!("saving rules.yaml: {e}"))?;
+        if let Some(h) = self.handle.lock().unwrap().as_ref() {
+            h.set_rules(set, &self.data_dir);
+        }
+        Ok(())
+    }
 }
 
 #[uniffi::export]
@@ -546,13 +645,186 @@ impl RelayEngine {
         if !problems.is_empty() {
             return problems;
         }
-        if let Err(e) = std::fs::write(self.data_dir.join("rules.yaml"), yaml) {
-            return vec![format!("saving rules.yaml: {e}")];
+        match self.save_rules(set, Some(yaml)) {
+            Ok(()) => vec![],
+            Err(e) => vec![e],
         }
-        if let Some(h) = self.handle.lock().unwrap().as_ref() {
-            h.set_rules(set, &self.data_dir);
-        }
-        vec![]
+    }
+
+    /// The current rules as YAML (a starter file when there are none).
+    pub fn rules_yaml(&self) -> String {
+        self.current_rules().to_yaml()
+    }
+
+    pub fn list_rules(&self) -> Vec<FfiRule> {
+        self.current_rules()
+            .rules
+            .iter()
+            .map(|r| FfiRule {
+                id: r.id.clone(),
+                name: r.name.clone(),
+                enabled: r.enabled,
+                kind: rule_kind(&r.action).into(),
+                summary: rule_summary(r),
+            })
+            .collect()
+    }
+
+    pub fn set_rule_enabled(&self, id: String, enabled: bool) -> Result<(), RelayError> {
+        let mut set = self.current_rules();
+        let rule = set
+            .rules
+            .iter_mut()
+            .find(|r| r.id == id)
+            .ok_or_else(|| RelayError::Failed {
+                reason: format!("no rule `{id}`"),
+            })?;
+        rule.enabled = enabled;
+        self.save_rules(set, None)
+            .map_err(|reason| RelayError::Failed { reason })
+    }
+
+    pub fn remove_rule(&self, id: String) -> Result<(), RelayError> {
+        let mut set = self.current_rules();
+        set.rules.retain(|r| r.id != id);
+        self.save_rules(set, None)
+            .map_err(|reason| RelayError::Failed { reason })
+    }
+
+    /// Adds a rule aimed at one captured request. `kind`: `block`, `breakpoint` (request and
+    /// response), `throttle-3g`, `offline`, or `map-local` (answers with the recorded response body,
+    /// saved under `mocks/`). Returns the new rule's id.
+    pub fn add_quick_rule(
+        &self,
+        kind: String,
+        request: FfiTransaction,
+    ) -> Result<String, RelayError> {
+        let fail = |reason: String| RelayError::Failed { reason };
+        use relay_model::rules::{Matcher, Phase, Rule, RuleAction, ThrottleProfile};
+        let mut set = self.current_rules();
+        let path = request.path.split('?').next().unwrap_or("/").to_owned();
+        let host_slug: String = request
+            .host
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect();
+        let base = format!("{kind}-{host_slug}");
+        let id = (1..)
+            .map(|n| {
+                if n == 1 {
+                    base.clone()
+                } else {
+                    format!("{base}-{n}")
+                }
+            })
+            .find(|c| !set.rules.iter().any(|r| &r.id == c))
+            .unwrap();
+        let action = match kind.as_str() {
+            "block" => RuleAction::Block { status: 403 },
+            "breakpoint" => RuleAction::Breakpoint { phase: Phase::Both },
+            "throttle-3g" => RuleAction::Throttle {
+                profile: ThrottleProfile::Preset("3g".into()),
+            },
+            "offline" => RuleAction::Throttle {
+                profile: ThrottleProfile::Preset("offline".into()),
+            },
+            "map-local" => {
+                let body = request
+                    .response_body_preview
+                    .clone()
+                    .ok_or_else(|| fail("this response has no text body to save".into()))?;
+                let json = request.response_headers.iter().any(|h| {
+                    h.name.eq_ignore_ascii_case("content-type") && h.value.contains("json")
+                });
+                let rel = format!("mocks/{id}.{}", if json { "json" } else { "txt" });
+                let full = self.data_dir.join(&rel);
+                std::fs::create_dir_all(full.parent().unwrap()).map_err(|e| fail(e.to_string()))?;
+                std::fs::write(&full, body).map_err(|e| fail(e.to_string()))?;
+                RuleAction::MapLocal {
+                    file: rel,
+                    status: request.status.unwrap_or(200),
+                    headers: Default::default(),
+                }
+            }
+            other => return Err(fail(format!("unknown rule kind `{other}`"))),
+        };
+        set.rules.push(Rule {
+            id: id.clone(),
+            name: format!("{} {}{}", request.method, request.host, path),
+            enabled: true,
+            matcher: Matcher {
+                method: Some(request.method.clone()),
+                host: Some(request.host.clone()),
+                path: Some(path),
+                ..Default::default()
+            },
+            action,
+        });
+        self.save_rules(set, None).map_err(fail)?;
+        Ok(id)
+    }
+
+    /// Requests and responses held at a breakpoint right now.
+    pub fn paused(&self) -> Vec<FfiPaused> {
+        self.handle
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|h| h.paused())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|p| {
+                let text = std::str::from_utf8(&p.body).is_ok();
+                FfiPaused {
+                    tx_id: p.tx_id,
+                    response: p.phase == relay_proxy::breakpoints::BreakPhase::Response,
+                    rule: p.rule,
+                    method: p.method,
+                    url: p.url,
+                    status: p.status,
+                    headers: p
+                        .headers
+                        .into_iter()
+                        .map(|h| FfiHeader {
+                            name: h.name,
+                            value: h.value,
+                        })
+                        .collect(),
+                    body: String::from_utf8_lossy(&p.body).into_owned(),
+                    body_is_text: text,
+                }
+            })
+            .collect()
+    }
+
+    /// Lets a held message go on. Pass `edit` to change it first; `None` sends it unchanged.
+    pub fn resume_paused(&self, tx_id: u64, response: bool, edit: Option<FfiEdit>) -> bool {
+        let edit = edit.map(|e| relay_proxy::breakpoints::Edit {
+            status: e.status,
+            headers: e
+                .headers
+                .into_iter()
+                .map(|h| relay_proxy::Header {
+                    name: h.name,
+                    value: h.value,
+                })
+                .collect(),
+            body: e.body.into_bytes(),
+        });
+        self.handle
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|h| h.resume(tx_id, phase_of(response), edit))
+    }
+
+    /// Cancels a held message; the app gets an error.
+    pub fn abort_paused(&self, tx_id: u64, response: bool) -> bool {
+        self.handle
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|h| h.abort(tx_id, phase_of(response)))
     }
 
     pub fn stop(&self) {
@@ -589,4 +861,66 @@ impl RelayEngine {
 #[uniffi::export]
 pub fn relay_core_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample() -> FfiTransaction {
+        FfiTransaction::from(Transaction {
+            id: 1,
+            started_at_ms: 0,
+            duration_ms: 1,
+            method: "GET".into(),
+            scheme: "https".into(),
+            host: "api.acme.com".into(),
+            port: 443,
+            path: "/v2/products?page=2".into(),
+            status: Some(200),
+            state: TransactionState::Complete,
+            error: None,
+            decrypted: true,
+            http_version: "HTTP/2".into(),
+            upstream_http_version: None,
+            request_headers: vec![],
+            response_headers: vec![relay_proxy::Header {
+                name: "content-type".into(),
+                value: "application/json".into(),
+            }],
+            request_body_size: 0,
+            response_body_size: 11,
+            request_body_preview: None,
+            response_body_preview: Some(r#"{"ok":true}"#.into()),
+            client_addr: "127.0.0.1:1".into(),
+            websocket_messages: vec![],
+            client_process: None,
+            applied_rules: vec![],
+        })
+    }
+
+    #[test]
+    fn quick_rules_are_saved_listed_toggled_and_removed() {
+        let dir = std::env::temp_dir().join(format!("relay-ffi-rules-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let engine = RelayEngine::new(dir.to_string_lossy().into()).unwrap();
+
+        let block = engine.add_quick_rule("block".into(), sample()).unwrap();
+        let again = engine.add_quick_rule("block".into(), sample()).unwrap();
+        assert_ne!(block, again, "ids stay unique");
+        let mock = engine.add_quick_rule("map-local".into(), sample()).unwrap();
+        assert!(dir.join(format!("mocks/{mock}.json")).exists());
+        assert!(engine.add_quick_rule("nonsense".into(), sample()).is_err());
+
+        let rules = engine.list_rules();
+        assert_eq!(rules.len(), 3);
+        assert_eq!(rules[0].summary, "GET api.acme.com /v2/products");
+        engine.set_rule_enabled(block.clone(), false).unwrap();
+        assert!(!engine.list_rules()[0].enabled);
+        // The saved file is valid YAML in the shared format.
+        assert!(engine.set_rules(engine.rules_yaml()).is_empty());
+        engine.remove_rule(block).unwrap();
+        assert_eq!(engine.list_rules().len(), 2);
+    }
 }

@@ -114,7 +114,9 @@ rules:
   - { id: slow, kind: throttle, match: { path: /images }, profile: 3g }
 ```
 
-Applied today: block, map local, map remote, rewrite (headers, status, JSON paths, text/regex replace, delay; gzip bodies are decoded) and throttle (latency, rough bandwidth delay from `Content-Length`, loss, offline). Not yet: breakpoints, and rewriting WebSocket or tunneled traffic.
+Applied today: block, map local, map remote, rewrite (headers, status, JSON paths, text/regex replace, delay; gzip bodies are decoded) and throttle (latency, rough bandwidth delay from `Content-Length`, loss, offline). **Breakpoints** hold a matching request and/or response (`kind: breakpoint`, `phase: request|response|both`) until you release it. The Mac app opens an editor (status, headers, body); *Resume* sends it as is or with your edits, *Abort* gives the app an error, and a forgotten one is released unchanged after 5 minutes. Not yet: rules on WebSocket or tunneled traffic.
+
+In the Mac app, **Rules** (toolbar) lists rules with on/off switches and a YAML editor, and right-clicking a request adds a rule for it: breakpoint, block, map local (answer with that response, saved under `mocks/`), throttle to 3G, or make it fail.
 
 ## Mac app
 

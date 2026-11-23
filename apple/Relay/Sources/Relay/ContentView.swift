@@ -6,6 +6,7 @@ struct ContentView: View {
     @State private var simulators: [BootedSimulator] = []
     @State private var simMessage: String?
     @State private var showConnect = false
+    @State private var showRules = false
 
     var body: some View {
         @Bindable var store = store
@@ -26,6 +27,8 @@ struct ContentView: View {
         .foregroundStyle(Theme.fg)
         .onAppear { simulators = Simulators.booted() }
         .sheet(isPresented: $showConnect) { ConnectView() }
+        .sheet(isPresented: $showRules) { RulesView() }
+        .sheet(item: Binding(get: { store.paused.first }, set: { _ in })) { BreakpointView(item: $0).id($0.id) }
     }
 
     // MARK: Toolbar
@@ -61,6 +64,17 @@ struct ContentView: View {
             .frame(maxWidth: 520)
 
             sourceMenu
+
+            Button(action: { showRules = true }) {
+                HStack(spacing: 6) {
+                    Image(systemName: "slider.horizontal.3")
+                    Text("Rules")
+                    if store.rules.contains(where: \.enabled) {
+                        Text("\(store.rules.filter(\.enabled).count)").foregroundStyle(Theme.accent)
+                    }
+                }
+            }
+            .buttonStyle(PillButtonStyle())
 
             Spacer()
 
@@ -149,6 +163,7 @@ struct ContentView: View {
                                 TrafficRow(tx: tx, selected: tx.id == store.selection)
                                     .contentShape(Rectangle())
                                     .onTapGesture { store.selection = tx.id }
+                                    .contextMenu { ruleMenu(for: tx) }
                                     .id(tx.id)
                             }
                         }
@@ -162,12 +177,24 @@ struct ContentView: View {
         .frame(maxWidth: .infinity)
     }
 
+    @ViewBuilder
+    private func ruleMenu(for tx: FfiTransaction) -> some View {
+        Button("Breakpoint on \(tx.host)\(tx.path.split(separator: "?").first.map { String($0) } ?? "")") { store.addQuickRule("breakpoint", for: tx) }
+        Button("Block this request") { store.addQuickRule("block", for: tx) }
+        Button("Map local: answer with this response") { store.addQuickRule("map-local", for: tx) }
+            .disabled(tx.responseBodyPreview == nil)
+        Divider()
+        Button("Throttle to 3G") { store.addQuickRule("throttle-3g", for: tx) }
+        Button("Make it fail (offline)") { store.addQuickRule("offline", for: tx) }
+    }
+
     private var footer: some View {
         HStack(spacing: 16) {
             Text("\(store.filtered.count) of \(store.transactions.count) requests")
             Text("\(store.transactions.filter { $0.state == .failed || ($0.status ?? 0) >= 500 }.count) failing")
                 .foregroundStyle(Theme.s5xx)
             if let simMessage { Text(simMessage).foregroundStyle(Theme.accent) }
+            if let m = store.ruleMessage { Text(m).foregroundStyle(Theme.s5xx).lineLimit(1) }
             if let err = store.errorMessage { Text(err).foregroundStyle(Theme.s5xx).lineLimit(1) }
             Spacer()
             Text(store.status)

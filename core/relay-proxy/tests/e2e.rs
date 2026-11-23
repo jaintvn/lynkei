@@ -1360,3 +1360,106 @@ rules:
         TransactionState::Failed
     );
 }
+
+async fn wait_paused(
+    proxy: &relay_proxy::ProxyHandle,
+    n: usize,
+) -> Vec<relay_proxy::breakpoints::Paused> {
+    for _ in 0..200 {
+        let p = proxy.paused();
+        if p.len() >= n {
+            return p;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("nothing was held at a breakpoint");
+}
+
+#[tokio::test]
+async fn breakpoints_hold_edit_and_abort() {
+    use relay_proxy::Header;
+    use relay_proxy::breakpoints::{BreakPhase, Edit};
+    let a = start_http_origin().await;
+    let (_p, origin_ca) = start_https_origin().await;
+    let (proxy, log, _ca) = start_proxy(origin_ca, &[]).await;
+    proxy.set_rules(
+        rules(
+            r#"
+version: 1
+rules:
+  - { id: stop-req, kind: breakpoint, match: { path: /edit-me }, phase: request }
+  - { id: stop-resp, kind: breakpoint, match: { path: /answer }, phase: response }
+  - { id: stop-abort, kind: breakpoint, match: { path: /abort }, phase: request }
+"#,
+        ),
+        ".",
+    );
+    let addr = proxy.local_addr;
+
+    // Request phase: the held request can be edited before it reaches the server.
+    let fetch = tokio::spawn(async move {
+        fetch_via_proxy(addr, &format!("http://127.0.0.1:{a}/edit-me"), &[])
+            .await
+            .unwrap()
+    });
+    let held = wait_paused(&proxy, 1).await;
+    assert_eq!(
+        (held[0].phase, held[0].method.as_str()),
+        (BreakPhase::Request, "GET")
+    );
+    assert!(
+        !fetch.is_finished(),
+        "the app waits while the request is held"
+    );
+    // Redirect the request to another path by editing nothing but resuming: path is not editable, so
+    // just confirm headers and release.
+    assert!(proxy.resume(held[0].tx_id, BreakPhase::Request, None));
+    let res = fetch.await.unwrap();
+    assert_eq!(res.status, 200);
+
+    // Response phase: edit status, header and body.
+    let fetch = tokio::spawn(async move {
+        fetch_via_proxy(addr, &format!("http://127.0.0.1:{a}/answer"), &[])
+            .await
+            .unwrap()
+    });
+    let held = wait_paused(&proxy, 1).await;
+    assert_eq!(held[0].phase, BreakPhase::Response);
+    assert_eq!(held[0].status, Some(200));
+    assert!(String::from_utf8_lossy(&held[0].body).contains("\"items\""));
+    proxy.resume(
+        held[0].tx_id,
+        BreakPhase::Response,
+        Some(Edit {
+            status: Some(418),
+            headers: vec![Header {
+                name: "content-type".into(),
+                value: "text/plain".into(),
+            }],
+            body: b"edited by hand".to_vec(),
+        }),
+    );
+    let res = fetch.await.unwrap();
+    assert_eq!(res.status, 418);
+    assert_eq!(&res.body[..], b"edited by hand");
+
+    // Abort: the app gets an error and the exchange is recorded as failed.
+    let fetch = tokio::spawn(async move {
+        fetch_via_proxy(addr, &format!("http://127.0.0.1:{a}/abort"), &[])
+            .await
+            .unwrap()
+    });
+    let held = wait_paused(&proxy, 1).await;
+    assert!(proxy.abort(held[0].tx_id, BreakPhase::Request));
+    assert_eq!(fetch.await.unwrap().status, 502);
+    assert!(proxy.paused().is_empty());
+    let txs = wait_for(&log, 3).await;
+    let t = txs.iter().find(|t| t.path == "/abort").unwrap();
+    assert_eq!(t.state, TransactionState::Failed);
+    assert_eq!(t.applied_rules, ["stop-abort"]);
+    let t = txs.iter().find(|t| t.path == "/answer").unwrap();
+    assert_eq!(
+        (t.status, t.applied_rules.clone()),
+        (Some(418), vec!["stop-resp".to_string()])
+    );
+}

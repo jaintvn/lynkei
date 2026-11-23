@@ -12,6 +12,9 @@ final class TrafficStore {
     var status: String = "Stopped"
     var errorMessage: String?
     var selection: FfiTransaction.ID?
+    /// Requests/responses held at a breakpoint, waiting for a decision.
+    private(set) var paused: [FfiPaused] = []
+    private(set) var rules: [FfiRule] = []
     var search: String = "" { didSet { revision &+= 1 } }
     /// "Only this device/app" choice, as a search term (`app:AcmeShop`, `client:192.168.0.5`).
     var source: String? { didSet { revision &+= 1 } }
@@ -34,6 +37,59 @@ final class TrafficStore {
     }
 
     var isRunning: Bool { port != nil }
+
+    // MARK: Rules and breakpoints
+
+    func refreshRules() { if let e = engine { rules = e.listRules() } }
+    func rulesYAML() -> String { engine?.rulesYaml() ?? "" }
+    func applyRulesYAML(_ yaml: String) -> [String] {
+        let problems = engine?.setRules(yaml: yaml) ?? ["Relay is not running"]
+        refreshRules()
+        return problems
+    }
+    func setRule(_ id: String, enabled: Bool) {
+        try? engine?.setRuleEnabled(id: id, enabled: enabled)
+        refreshRules()
+    }
+    func removeRule(_ id: String) {
+        try? engine?.removeRule(id: id)
+        refreshRules()
+    }
+    /// Adds a rule aimed at one request (`block`, `breakpoint`, `throttle-3g`, `offline`, `map-local`).
+    func addQuickRule(_ kind: String, for tx: FfiTransaction) {
+        do {
+            _ = try engine?.addQuickRule(kind: kind, request: tx)
+            ruleMessage = nil
+        } catch {
+            ruleMessage = "\(error)"
+        }
+        refreshRules()
+    }
+    var ruleMessage: String?
+
+    func resumePaused(_ p: FfiPaused, edit: FfiEdit?) {
+        _ = engine?.resumePaused(txId: p.txId, response: p.response, edit: edit)
+        paused.removeAll { $0.id == p.id }
+    }
+    func abortPaused(_ p: FfiPaused) {
+        _ = engine?.abortPaused(txId: p.txId, response: p.response)
+        paused.removeAll { $0.id == p.id }
+    }
+
+    /// Polls for held messages while the engine runs (cheap: a lock and a copy).
+    private func watchBreakpoints() {
+        guard pauseWatcher == nil else { return }
+        pauseWatcher = Task { [weak self] in
+            while !Task.isCancelled {
+                if let engine = self?.engine {
+                    let held = await Task.detached { engine.paused() }.value
+                    if let self, held.map(\.id) != self.paused.map(\.id) { self.paused = held }
+                }
+                try? await Task.sleep(for: .milliseconds(300))
+            }
+        }
+    }
+    @ObservationIgnored private var pauseWatcher: Task<Void, Never>?
 
     private var query: String {
         [source, search.trimmingCharacters(in: .whitespaces)].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " ")
@@ -97,6 +153,8 @@ final class TrafficStore {
             port = bound
             caPath = try engine.caCertificatePath()
             status = "Listening on port \(bound)"
+            refreshRules()
+            watchBreakpoints()
             errorMessage = nil
         } catch {
             errorMessage = "\(error)"

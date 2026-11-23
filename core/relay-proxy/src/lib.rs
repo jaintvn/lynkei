@@ -3,6 +3,7 @@
 //! Platform-neutral: runs on macOS (inside relayd / the app) and on Android.
 
 pub mod body;
+pub mod breakpoints;
 pub mod ca;
 pub mod client;
 pub mod procinfo;

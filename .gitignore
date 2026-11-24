@@ -21,10 +21,6 @@ design/stitch/
 .DS_Store
 
 
-# iOS demo app build output
-ios/**/build/
-ios/**/DerivedData/
-ios/**/build-device/
 
 # Built bundles for sharing
 dist/

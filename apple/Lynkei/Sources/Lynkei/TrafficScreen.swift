@@ -207,6 +207,7 @@ struct TrafficScreen: View {
             }
             Divider()
             Button("Share session…") { SessionIO.share(store: store) }
+            Button("Connect AI agent…") { sheets.showAgents = true }
             Button("Open session…") { SessionIO.open(store: store) }
             Divider()
             Toggle("Capture device logs", isOn: Binding(get: { LogStore.shared.enabled }, set: { LogStore.shared.enabled = $0 }))

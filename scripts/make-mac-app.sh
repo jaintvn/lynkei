@@ -22,6 +22,27 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/Lynkei"
 cp "$PKG/Resources/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
+
+# Helpers for AI agents: the engine daemon and the MCP server travel inside the app, so
+# "Connect AI Agent" works with nothing else installed.
+export PATH="/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin:$PATH"
+export MACOSX_DEPLOYMENT_TARGET=14.0
+case "${2:-}" in
+  universal) RUST_TARGETS=(aarch64-apple-darwin x86_64-apple-darwin) ;;
+  x86_64) RUST_TARGETS=(x86_64-apple-darwin) ;;
+  *) RUST_TARGETS=(aarch64-apple-darwin) ;;
+esac
+mkdir -p "$APP/Contents/Helpers"
+for T in "${RUST_TARGETS[@]}"; do
+  (cd "$ROOT/core" && cargo build -q --release -p lynkeid -p lynkei-mcp --target "$T")
+done
+for H in lynkeid lynkei-mcp; do
+  if [ "${#RUST_TARGETS[@]}" = 2 ]; then
+    lipo -create "$ROOT/core/target/aarch64-apple-darwin/release/$H" "$ROOT/core/target/x86_64-apple-darwin/release/$H" -output "$APP/Contents/Helpers/$H"
+  else
+    cp "$ROOT/core/target/${RUST_TARGETS[0]}/release/$H" "$APP/Contents/Helpers/$H"
+  fi
+done
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -55,5 +76,6 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 </dict>
 </plist>
 PLIST
+codesign --force --sign - "$APP/Contents/Helpers/lynkeid" "$APP/Contents/Helpers/lynkei-mcp" >/dev/null 2>&1 || true
 codesign --force --sign - "$APP" >/dev/null 2>&1 || true
 echo "$APP"

@@ -14,7 +14,7 @@ An open-source, Charles-class HTTP(S) debugging proxy for mobile developers: nat
 ![SwiftUI](https://img.shields.io/badge/SwiftUI-Mac%20app-f05138?style=for-the-badge&logo=swift&logoColor=white)
 ![MCP](https://img.shields.io/badge/MCP-agent%20ready-10b981?style=for-the-badge)
 
-[**Download**](#-download) · [**Features**](#-everything-lynkei-does) · [**Quick start**](#-quick-start) · [**Full guide**](docs/GUIDE.md) · [**Plan**](PLAN.md)
+[**Download**](#-download) · [**Features**](#-everything-lynkei-does) · [**Connect an AI agent**](#-connect-an-ai-agent) · [**Quick start**](#-quick-start) · [**Full guide**](docs/GUIDE.md) · [**Plan**](PLAN.md)
 
 <br/>
 
@@ -47,7 +47,6 @@ Grab the build for your Mac from the [latest release](https://github.com/jaintvn
 |---|---|
 | Apple Silicon (M1 and later) | `Lynkei-mac-apple-silicon.zip` |
 | Intel | `Lynkei-mac-intel.zip` |
-| Android demo app | `AcmeShop-demo.apk` |
 
 > [!NOTE]
 > The builds are not notarized yet. If macOS blocks the app, unzip it and run `xattr -dr com.apple.quarantine Lynkei.app`, or use *System Settings → Privacy & Security → Open Anyway*. Downloading with `gh release download` or `curl` avoids the block.
@@ -152,18 +151,52 @@ A small pill hugging the notch (a floating pill on Macs without one) shows reque
 
 ---
 
-## 🤖 AI agents (MCP)
+## 🤖 Connect an AI agent
 
-`lynkei-mcp` is a Model Context Protocol server over the same control API the app and CLI use. An agent can connect a device, search traffic, add or toggle rules, send and repeat requests, handle paused calls and record scenarios.
+Lynkei runs an [MCP](https://modelcontextprotocol.io) server inside the app, at a **fixed local address**. Add it to any AI agent once and it keeps working: it is `127.0.0.1`, so Wi-Fi, VPN and IP changes never matter. The agent sees exactly what you see in the app (live traffic, rules, devices, held requests) and can connect a simulator, search and replay calls, add mocks and rewrite rules, and release breakpoints.
 
-```bash
-cd core && cargo build -p lynkei-mcp --release
-claude mcp add lynkei -- /path/to/lynkei-mcp      # Claude Code
+<div align="center">
+<img src="docs/screenshots/agents.jpg" alt="Connect an AI agent: the fixed local MCP address, a copy button and the JSON to paste" width="760" />
+</div>
+
+**1. Add the server to your agent.** Open **Help → Connect AI Agent…**, copy the address, and add it in your agent's MCP settings as an HTTP server. Or paste this:
+
+```json
+{ "mcpServers": { "lynkei": { "url": "http://127.0.0.1:8890/mcp" } } }
 ```
 
-For any other MCP client: `{ "mcpServers": { "lynkei": { "command": "/path/to/lynkei-mcp" } } }`.
+**2. Restart the agent.** Agents read their MCP list when they start.
 
-**28 tools** (`search_traffic`, `get_transaction`, `add_rule`, `repeat_request`, `record_scenario`, `wait_paused`, …), live **resources** (`lynkei://traffic?query=status:5xx`), and ready-made **prompts** (`debug_failing_endpoint`, `mock_api_offline`, `find_slow_calls`). Secrets are redacted and bodies left out unless the call asks for them.
+**3. Ask.**
+
+> *"Use Lynkei to connect my iPhone simulator, then tell me which requests are failing and why."*
+> *"Mock `/v2/products` with an empty list and check the app shows its empty state."*
+> *"What are the slowest endpoints in the last 10 minutes?"*
+
+**Good to know**
+- It starts with the app (switch it off in the same sheet) and only answers requests from this Mac. Web pages in your browser are refused.
+- If something else already uses port `8890`, the sheet says so and lets you pick another port; update your agent once.
+- Agents work while Lynkei is open. Close the app and they simply can't connect until you reopen it; no reconfiguring.
+- An agent that only supports local (stdio) servers can bridge with `npx -y mcp-remote http://127.0.0.1:8890/mcp`.
+
+### What agents get
+
+| | |
+|---|---|
+| **28 tools** | `status`, `list_devices`, `connect_device`, `search_traffic`, `get_transaction`, `add_rule`, `toggle_rule`, `send_request`, `repeat_request`, `list_paused`, `resume_paused`, `record_scenario`, `replay_scenario`, `set_throttle`, `set_ssl_decrypt`, … |
+| **Resources** | `lynkei://status`, `rules`, `devices`, `paused`, `traffic` (also `lynkei://traffic?query=status:5xx`) |
+| **Prompts** | `debug_failing_endpoint`, `mock_api_offline`, `find_slow_calls` |
+| **Safe by default** | `Authorization`, cookies and API-key headers are redacted and bodies left out unless the agent explicitly asks for them. |
+
+For CI or a machine without the app, run the headless engine and the same server: `lynkeid &` then `lynkei-mcp --http`, or point an agent at the `lynkei-mcp` binary (stdio); it starts the engine itself. `lynkei-mcp doctor` checks the setup. Details are in the [guide](docs/GUIDE.md#ai-agents-mcp).
+
+---|---|
+| **28 tools** | `status`, `list_devices`, `connect_device`, `search_traffic`, `get_transaction`, `add_rule`, `toggle_rule`, `send_request`, `repeat_request`, `list_paused`, `resume_paused`, `record_scenario`, `replay_scenario`, `set_throttle`, `set_ssl_decrypt`, … |
+| **Live resources** | `lynkei://status`, `rules`, `devices`, `paused`, `traffic` (also `lynkei://traffic?query=status:5xx`). Agents can subscribe and are told when a matching call arrives or a request is held. |
+| **Prompts** | `debug_failing_endpoint`, `mock_api_offline`, `find_slow_calls` |
+| **Safe by default** | `Authorization`, cookies and API-key headers are redacted and bodies left out unless the agent explicitly asks for them. |
+
+Trouble? Run `lynkei-mcp doctor`; it prints the binary, engine and socket it found and starts the engine if needed. Full reference in the [guide](docs/GUIDE.md#ai-agents-mcp).
 
 ---
 
@@ -195,7 +228,6 @@ core/                    Rust workspace, no platform code
   lynkei-mcp/              MCP server for AI agents
   lynkeid/, lynkei-cli/    Daemon and command line
 apple/Lynkei/            SwiftUI Mac app
-ios/AcmeShop/            Demo iOS app that calls a local mock API
 ```
 
 A Lynkei app for Android and an iOS companion are planned once there is user feedback.
@@ -216,13 +248,13 @@ scripts/make-mac-app.sh release x86_64     # Intel only (run UNIVERSAL=1 scripts
 scripts/check.sh                           # fmt, clippy, tests and the Apple build, locally
 ```
 
-**Try it with the demo app:** `scripts/demo-server.sh` starts a local mock API; connect a simulator in Lynkei, open **Acme Shop** and tap **Run every call**. Details are in the [full guide](docs/GUIDE.md#try-it-with-the-demo-app).
+**Try it with your own app:** run it in the iOS Simulator or an Android emulator, press **Connect** on the Connect screen and use the app. Calls show up immediately.
 
 ---
 
 ## 📚 Learn more
 
-- **[Full guide](docs/GUIDE.md):** rule syntax, breakpoints from a terminal, rewrite sheet, search language, MCP reference, demo apps.
+- **[Full guide](docs/GUIDE.md):** rule syntax, breakpoints from a terminal, rewrite sheet, search language and the MCP reference.
 - **[PLAN.md](PLAN.md):** roadmap and status.
 
 <div align="center"><sub>Made for people who are tired of guessing what their app sends.</sub></div>

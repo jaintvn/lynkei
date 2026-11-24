@@ -11,9 +11,11 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
+mod http;
 mod prompts;
 mod resources;
 mod scenarios;
+mod setup;
 
 use lynkei_model::rules::{Rule, RuleSet};
 use serde_json::{Value, json};
@@ -51,6 +53,10 @@ async fn main() -> Result<()> {
             .and_then(|i| args.get(i + 1))
             .cloned()
     };
+    if let Some("help" | "--help" | "-h") = args.first().map(String::as_str) {
+        println!("{}", setup::HELP);
+        return Ok(());
+    }
     let data_dir = opt("--data-dir")
         .map(PathBuf::from)
         .unwrap_or_else(default_data_dir);
@@ -63,13 +69,37 @@ async fn main() -> Result<()> {
         data_dir
     };
 
+    setup::remember_data_dir(&data_dir);
+    if args.first().map(String::as_str) == Some("doctor") {
+        std::process::exit(setup::doctor(&socket).await);
+    }
+    // Start Lynkei's engine in the background so the first tool call finds it ready.
+    {
+        let socket = socket.clone();
+        tokio::spawn(async move {
+            let _ = setup::ensure_daemon(&socket).await;
+        });
+    }
+
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
+    let http_addr = args.iter().position(|a| a == "--http").map(|i| {
+        args.get(i + 1)
+            .filter(|a| !a.starts_with("--"))
+            .cloned()
+            .unwrap_or_else(|| "127.0.0.1:8890".to_string())
+    });
     let ctx = std::sync::Arc::new(Ctx {
         socket,
         data_dir,
         out: tx.clone(),
         subs: Default::default(),
     });
+
+    if let Some(addr) = http_addr {
+        // Notifications have nowhere to go over plain request/response HTTP.
+        tokio::spawn(async move { while rx.recv().await.is_some() {} });
+        return http::serve(&addr, ctx).await.map_err(Into::into);
+    }
 
     // One writer for replies and for notifications from watchers.
     let writer = tokio::spawn(async move {
@@ -114,7 +144,7 @@ fn error_reply(id: Value, code: i64, message: &str) -> Value {
 }
 
 /// One incoming message; `None` for notifications (no reply).
-async fn handle(msg: &Value, ctx: &Ctx) -> Option<Value> {
+pub(crate) async fn handle(msg: &Value, ctx: &Ctx) -> Option<Value> {
     let socket = ctx.socket.as_path();
     let method = msg.get("method").and_then(Value::as_str)?;
     let id = msg.get("id").cloned();
@@ -128,7 +158,7 @@ async fn handle(msg: &Value, ctx: &Ctx) -> Option<Value> {
             "protocolVersion": params.get("protocolVersion").and_then(Value::as_str).unwrap_or(PROTOCOL),
             "capabilities": {"tools": {}, "resources": {"subscribe": true}, "prompts": {}},
             "serverInfo": {"name": "lynkei", "version": env!("CARGO_PKG_VERSION")},
-            "instructions": "Lynkei is a debugging proxy. Start with `status`; connect a device with `list_devices` and `connect_device`; read traffic with `search_traffic`; change behaviour with `add_rule`; handle held calls with `list_paused` and `resume_paused`."
+            "instructions": "Lynkei is a debugging proxy for mobile and web apps; its engine starts automatically. Start with `status` (it says which proxy port to use); connect a device with `list_devices` and `connect_device`; read traffic with `search_traffic`; change behaviour with `add_rule`; handle held calls with `list_paused` and `resume_paused`."
         }),
         "ping" => json!({}),
         "resources/list" => json!({"resources": resources::list()}),
@@ -206,6 +236,9 @@ fn text_of(v: &Value) -> String {
 }
 
 pub async fn rpc(socket: &std::path::Path, method: &str, params: Value) -> Result<Value, String> {
+    if lynkei_control::Client::connect(socket).await.is_err() {
+        setup::ensure_daemon(socket).await?;
+    }
     let mut c = lynkei_control::Client::connect(socket)
         .await
         .map_err(|e| format!("{e:#}"))?;

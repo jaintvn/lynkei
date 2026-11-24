@@ -3,6 +3,7 @@
 > Working name: **Lynkei**. You can rename it.
 > Goal: Charles-level power (capture, SSL, breakpoints, rewrite, map local/remote, throttle), with **one-click device setup**, a modern UI, a notch "Dynamic Island", and **full MCP control** so AI agents can drive every operation.
 > **Update (2026-11-23): Lynkei for Android is on hold until there is user feedback.** The Android app, its demo app, its build scripts and its CI job were removed from the repo. The Mac app still connects Android emulators and phones over adb, and the Rust core keeps its VPN/TUN support for later. Sections 8 and P7–P9 below describe the future app.
+> **Update (2026-11-24):** the demo apps (iOS and Android) and the demo server were removed; test with your own app. The Mac app now serves the control API from its own engine and runs the MCP server on a fixed local address (`http://127.0.0.1:8890/mcp`, `Help → Connect AI Agent…`), so any agent connects once and sees the app's live traffic. `lynkei-mcp` ships in `Lynkei.app/Contents/Helpers`, can also start `lynkeid` itself for headless use, and has `--http` and `doctor` modes.
 >
 > Products: **Lynkei for Mac** first, then **Lynkei for Android**, an on-device debugger that captures and edits traffic of apps on the phone itself, with no Mac needed. Both share one engine, one rule format and one session format, so the Android app is mostly UI work when it starts.
 

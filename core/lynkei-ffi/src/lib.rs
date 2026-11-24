@@ -9,6 +9,8 @@ use lynkei_proxy::{EventSink, ProxyConfig, ProxyHandle, Transaction, Transaction
 
 uniffi::setup_scaffolding!();
 
+mod agent_api;
+
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum LynkeiError {
     #[error("{reason}")]

@@ -30,6 +30,7 @@ struct LynkeiApp: App {
         .defaultSize(width: 1440, height: 900)
         .commands {
             CommandGroup(after: .help) {
+                Button("Connect AI Agent…") { NotificationCenter.default.post(name: .lynkeiShowAgents, object: nil) }
                 Button("Install Lynkei Certificate on This Mac…") { MacCertificate.shared.install() }
                 Button("Show Lynkei Certificate in Finder") { MacCertificate.shared.revealFile() }
             }

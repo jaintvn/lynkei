@@ -263,6 +263,7 @@ final class TrafficStore {
             refreshRules()
             refreshSwitches()
             watchBreakpoints()
+            if let socket = try? engine.startAgentApi() { AgentAccess.shared.engineReady(socket: socket) }
             LogStore.shared.start()
             errorMessage = nil
         } catch {
@@ -273,6 +274,7 @@ final class TrafficStore {
 
     /// Called when the app quits: undo every device connection and the system proxy.
     func shutdown() {
+        AgentAccess.shared.stop()
         LogStore.shared.stop()
         engine?.disconnectAllDevices()
         engine?.stop()

@@ -11,6 +11,7 @@ enum Screen: String, CaseIterable, Hashable {
 @Observable
 final class Sheets {
     var showConnect = false
+    var showAgents = false
     var mapLocalFor: FfiTransaction?
     var composing: ComposeDraft?
     var dnsFor: FfiTransaction?
@@ -61,6 +62,8 @@ struct ContentView: View {
             }
         }
         .sheet(isPresented: $sheets.showConnect) { ConnectView() }
+        .sheet(isPresented: $sheets.showAgents) { AgentConnectView() }
+        .onReceive(NotificationCenter.default.publisher(for: .lynkeiShowAgents)) { _ in sheets.showAgents = true }
         .sheet(item: $sheets.mapLocalFor) { MapLocalView(tx: $0) }
         .sheet(item: $sheets.composing) { ComposeView(draft: $0) }
         .sheet(item: $sheets.dnsFor) { DnsSpoofView(tx: $0) }
@@ -182,3 +185,5 @@ func formatBytes(_ b: UInt64) -> String {
     if b >= 1024 { return String(format: "%.1f KB", Double(b) / 1024) }
     return "\(b) B"
 }
+
+extension Notification.Name { static let lynkeiShowAgents = Notification.Name("lynkei.showAgents") }

@@ -14,7 +14,7 @@ An open-source, Charles-class HTTP(S) debugging proxy for mobile developers: nat
 ![SwiftUI](https://img.shields.io/badge/SwiftUI-Mac%20app-f05138?style=for-the-badge&logo=swift&logoColor=white)
 ![MCP](https://img.shields.io/badge/MCP-agent%20ready-10b981?style=for-the-badge)
 
-[**Download**](#-download) · [**Features**](#-everything-lynkei-does) · [**Connect an AI agent**](#-connect-an-ai-agent) · [**Quick start**](#-quick-start) · [**Full guide**](docs/GUIDE.md) · [**Plan**](PLAN.md)
+[**Download**](#-download) · [**Features**](#-everything-lynkei-does) · [**Connect an AI agent**](#-connect-an-ai-agent) · [**Quick start**](#-quick-start) · [**Full guide**](docs/GUIDE.md)
 
 <br/>
 
@@ -255,6 +255,5 @@ scripts/check.sh                           # fmt, clippy, tests and the Apple bu
 ## 📚 Learn more
 
 - **[Full guide](docs/GUIDE.md):** rule syntax, breakpoints from a terminal, rewrite sheet, search language and the MCP reference.
-- **[PLAN.md](PLAN.md):** roadmap and status.
 
 <div align="center"><sub>Made for people who are tired of guessing what their app sends.</sub></div>

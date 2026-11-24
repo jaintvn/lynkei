@@ -24,3 +24,9 @@ design/stitch/
 
 # Built bundles for sharing
 dist/
+
+# Internal planning, design and dev-only material (kept locally, not published)
+PLAN.md
+design/
+scripts/make-icon.swift
+*.dmg

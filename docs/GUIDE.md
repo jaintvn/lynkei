@@ -1,6 +1,6 @@
 # Lynkei guide: rules, CLI, MCP and every feature in detail
 
-An open-source, Charles-class HTTP(S) debugging proxy for iOS and Android developers. A shared Rust engine (`core/`) is used by a SwiftUI Mac app. A Lynkei app for Android is planned once there is user feedback. See [PLAN.md](PLAN.md) for the full plan and the [UI design canvas](https://claude.ai/artifact/8Av8hoMna1fDGx5AWLe5SE).
+An open-source, Charles-class HTTP(S) debugging proxy for iOS and Android developers. A shared Rust engine (`core/`) is used by a SwiftUI Mac app. A Lynkei app for Android is planned once there is user feedback.
 
 **Status: P1 complete.** Every feature below is in place and has been checked on macOS:
 

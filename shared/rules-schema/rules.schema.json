@@ -389,7 +389,7 @@
           ]
         },
         {
-          "description": "Connect to a different address for a host (like an `/etc/hosts` entry, but only for traffic\nthrough Relay). The app still sees the original host name: `Host`, TLS name and certificate\nchecks are unchanged. Only `match.host` is used.",
+          "description": "Connect to a different address for a host (like an `/etc/hosts` entry, but only for traffic\nthrough Lynkei). The app still sees the original host name: `Host`, TLS name and certificate\nchecks are unchanged. Only `match.host` is used.",
           "type": "object",
           "properties": {
             "kind": {

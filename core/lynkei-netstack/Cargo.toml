@@ -1,0 +1,17 @@
+[package]
+name = "lynkei-netstack"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = "1.0.104"
+ipstack = "1.0.1"
+libc = "0.2.191"
+lynkei-proxy = { version = "0.1.0", path = "../lynkei-proxy" }
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "net", "io-util", "macros", "sync", "time"] }
+tracing = "0.1.44"
+
+[dev-dependencies]
+etherparse = "0.20"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "io-util", "time"] }

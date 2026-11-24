@@ -1,0 +1,28 @@
+[package]
+name = "lynkei-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "lynkei_ffi"
+crate-type = ["lib", "staticlib", "cdylib"]
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+
+[dependencies]
+anyhow = "1.0.104"
+lynkei-control = { version = "0.1.0", path = "../lynkei-control" }
+lynkei-devices = { version = "0.1.0", path = "../lynkei-devices" }
+lynkei-model = { version = "0.1.0", path = "../lynkei-model" }
+lynkei-netstack = { version = "0.1.0", path = "../lynkei-netstack" }
+lynkei-proxy = { version = "0.1.0", path = "../lynkei-proxy" }
+lynkei-store = { version = "0.1.0", path = "../lynkei-store" }
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std"] }
+serde_json = "1.0.154"
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["rt-multi-thread"] }
+uniffi = { version = "0.32.2", features = ["cli"] }

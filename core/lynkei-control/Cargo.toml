@@ -1,0 +1,21 @@
+[package]
+name = "lynkei-control"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = "1.0.104"
+libc = "0.2.191"
+lynkei-devices = { version = "0.1.0", path = "../lynkei-devices" }
+lynkei-model = { version = "0.1.0", path = "../lynkei-model" }
+lynkei-proxy = { version = "0.1.0", path = "../lynkei-proxy" }
+lynkei-store = { version = "0.1.0", path = "../lynkei-store" }
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "net", "io-util", "macros", "sync", "time", "fs"] }
+tracing = "0.1.44"
+
+[dev-dependencies]
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "time", "net", "io-util"] }

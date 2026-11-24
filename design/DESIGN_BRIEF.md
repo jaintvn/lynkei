@@ -1,9 +1,9 @@
-# Relay: UI design brief
+# Lynkei: UI design brief
 
 This one brief goes to both **Google Stitch** and **Claude Design** so the two results can be compared fairly. Both get the same screens, content and sample data.
 
 ## Product
-Relay is an open-source macOS app (with an Android app later) for inspecting and modifying the network traffic of iOS and Android apps during development. It's a modern replacement for Charles Proxy. Users are mobile developers and QA engineers, who spend hours a day in it next to Xcode or Android Studio.
+Lynkei is an open-source macOS app (with an Android app later) for inspecting and modifying the network traffic of iOS and Android apps during development. It's a modern replacement for Charles Proxy. Users are mobile developers and QA engineers, who spend hours a day in it next to Xcode or Android Studio.
 
 ## Visual direction
 - **Modern and minimal.** It should feel native to macOS (Sonoma and later): SF Pro / SF Mono, SF Symbols-style line icons, a translucent sidebar, 8 pt grid, 10–12 px radii, hairline separators, no heavy borders or gradients.
@@ -33,7 +33,7 @@ Relay is an open-source macOS app (with an Android app later) for inspecting and
 ## Screens to design
 
 ### Mac app (1440 × 900 window)
-1. **Connect a device (onboarding sheet).** Auto-detected device cards (iOS Simulator, Android Emulator, Android USB, iPhone over Wi-Fi), each with a single "Connect" button and a three-step status checklist: *Proxy · Certificate trusted · Traffic seen*. The iPhone card shows a QR code with "Scan with your iPhone camera". The tone is effortless: "Relay sets everything up for you."
+1. **Connect a device (onboarding sheet).** Auto-detected device cards (iOS Simulator, Android Emulator, Android USB, iPhone over Wi-Fi), each with a single "Connect" button and a three-step status checklist: *Proxy · Certificate trusted · Traffic seen*. The iPhone card shows a QR code with "Scan with your iPhone camera". The tone is effortless: "Lynkei sets everything up for you."
 2. **Dashboard (home after connecting).** Cards: live requests/sec sparkline, error rate, slowest endpoints, failing endpoints, top hosts, active rules (with toggles), and a live tail of the latest calls. A device switcher appears at the top.
 3. **Traffic (main working screen).** Three panes:
    - Sidebar: Devices, Apps, Domains → endpoints tree, Saved views, Rules with on/off switches.
@@ -57,3 +57,10 @@ Relay is an open-source macOS app (with an Android app later) for inspecting and
 - The same content on every screen, so the two tools can be compared on visual quality only.
 - Dark mode for all screens; light mode at least for the Traffic screen.
 - Realistic density. This is a pro tool, not a marketing page.
+
+## App header and logo (Lynkei)
+
+- The window uses a hidden title bar. The three window buttons (close, minimise, zoom) sit in their own thin strip at the very top, **above** the app header. They are never on the same line as the logo.
+- Below that strip, the header row is 52 pt tall: logo mark (22 pt) + "Lynkei" at the far left, then the Dashboard / Traffic / Endpoints / Rules pills, then the toolbar.
+- The logo's left edge lines up with the left edge of the sidebar text (about 18 pt from the window edge). There is no extra indent for the window buttons.
+- The mark is an "L" made of two linked nodes with a green packet on the line. The app icon is the same mark on a dark rounded square (`scripts/make-icon.swift`).

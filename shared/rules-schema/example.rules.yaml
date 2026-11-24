@@ -1,5 +1,5 @@
 # yaml-language-server: $schema=./rules.schema.json
-# Relay rules — commit this file next to your app. Validate with: relay rules check <file>
+# Lynkei rules — commit this file next to your app. Validate with: lynkei rules check <file>
 version: 1
 rules:
   - id: new-checkout

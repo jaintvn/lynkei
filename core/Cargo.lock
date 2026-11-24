@@ -788,6 +788,190 @@ dependencies = [
 ]
 
 [[package]]
+name = "lynkei-bench"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "futures-core",
+ "http",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "lynkei-proxy",
+ "lynkei-store",
+ "rcgen",
+ "rustls",
+ "tokio",
+ "tokio-rustls",
+]
+
+[[package]]
+name = "lynkei-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "lynkei-control",
+ "lynkei-model",
+ "lynkei-proxy",
+ "rustls",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "lynkei-control"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "libc",
+ "lynkei-devices",
+ "lynkei-model",
+ "lynkei-proxy",
+ "lynkei-store",
+ "rustls",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "lynkei-demo-server"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "flate2",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "lynkei-devices"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
+name = "lynkei-ffi"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "lynkei-control",
+ "lynkei-devices",
+ "lynkei-model",
+ "lynkei-netstack",
+ "lynkei-proxy",
+ "lynkei-store",
+ "rustls",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "uniffi",
+]
+
+[[package]]
+name = "lynkei-mcp"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "lynkei-control",
+ "lynkei-model",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "lynkei-model"
+version = "0.1.0"
+dependencies = [
+ "schemars",
+ "serde",
+ "serde_json",
+ "serde_norway",
+]
+
+[[package]]
+name = "lynkei-netstack"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "etherparse",
+ "ipstack",
+ "libc",
+ "lynkei-proxy",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "lynkei-proxy"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "bytes",
+ "flate2",
+ "futures-core",
+ "futures-util",
+ "http",
+ "http-body",
+ "http-body-util",
+ "hyper",
+ "hyper-rustls",
+ "hyper-util",
+ "lru",
+ "lynkei-model",
+ "rand",
+ "rcgen",
+ "regex",
+ "rustls",
+ "serde_json",
+ "thiserror",
+ "time",
+ "tokio",
+ "tokio-rustls",
+ "tokio-tungstenite",
+ "tower-service",
+ "tracing",
+ "webpki-roots",
+]
+
+[[package]]
+name = "lynkei-store"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "lynkei-model",
+ "lynkei-proxy",
+ "rusqlite",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
+name = "lynkeid"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "lynkei-control",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "matchers"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1040,190 +1224,6 @@ name = "regex-syntax"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d902046e6a28a1e4c3cab97258a0ce11e994903f01c2d97a9447a0b3df85f4f6"
-
-[[package]]
-name = "relay-bench"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bytes",
- "futures-core",
- "http",
- "http-body-util",
- "hyper",
- "hyper-util",
- "rcgen",
- "relay-proxy",
- "relay-store",
- "rustls",
- "tokio",
- "tokio-rustls",
-]
-
-[[package]]
-name = "relay-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "relay-control",
- "relay-model",
- "relay-proxy",
- "rustls",
- "serde_json",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "relay-control"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "libc",
- "relay-devices",
- "relay-model",
- "relay-proxy",
- "relay-store",
- "rustls",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "relay-demo-server"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bytes",
- "flate2",
- "http-body-util",
- "hyper",
- "hyper-util",
- "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "relay-devices"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "serde",
- "serde_json",
- "tracing",
-]
-
-[[package]]
-name = "relay-ffi"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "relay-control",
- "relay-devices",
- "relay-model",
- "relay-netstack",
- "relay-proxy",
- "relay-store",
- "rustls",
- "serde_json",
- "thiserror",
- "tokio",
- "uniffi",
-]
-
-[[package]]
-name = "relay-mcp"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "relay-control",
- "relay-model",
- "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "relay-model"
-version = "0.1.0"
-dependencies = [
- "schemars",
- "serde",
- "serde_json",
- "serde_norway",
-]
-
-[[package]]
-name = "relay-netstack"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "etherparse",
- "ipstack",
- "libc",
- "relay-proxy",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "relay-proxy"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "base64",
- "bytes",
- "flate2",
- "futures-core",
- "futures-util",
- "http",
- "http-body",
- "http-body-util",
- "hyper",
- "hyper-rustls",
- "hyper-util",
- "lru",
- "rand",
- "rcgen",
- "regex",
- "relay-model",
- "rustls",
- "serde_json",
- "thiserror",
- "time",
- "tokio",
- "tokio-rustls",
- "tokio-tungstenite",
- "tower-service",
- "tracing",
- "webpki-roots",
-]
-
-[[package]]
-name = "relay-store"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "relay-model",
- "relay-proxy",
- "rusqlite",
- "serde_json",
- "tracing",
-]
-
-[[package]]
-name = "relayd"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "relay-control",
- "serde_json",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
 
 [[package]]
 name = "ring"

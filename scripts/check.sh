@@ -22,7 +22,7 @@ if [ "${1:-all}" != "core" ]; then
   step "XCFramework + Swift bindings"
   scripts/build-apple.sh
   step "Mac app build"
-  swift build --package-path apple/Relay
+  swift build --package-path apple/Lynkei
 fi
 
 printf '\n\033[1;32mAll checks passed.\033[0m\n'

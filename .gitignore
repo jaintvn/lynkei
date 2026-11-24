@@ -7,13 +7,13 @@ core/target/
 # Swift / Xcode
 apple/**/.build/
 apple/**/build/
-apple/RelayKit/RelayFFI.xcframework/
+apple/LynkeiKit/LynkeiFFI.xcframework/
 *.xcuserstate
 xcuserdata/
 DerivedData/
 
 # Generated bindings (rebuild with scripts/build-apple.sh)
-apple/RelayKit/Sources/RelayKit/Generated/
+apple/LynkeiKit/Sources/LynkeiKit/Generated/
 
 # Rejected Stitch exploration (kept locally for reference only)
 design/stitch/

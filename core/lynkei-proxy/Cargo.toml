@@ -1,0 +1,39 @@
+[package]
+name = "lynkei-proxy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+anyhow = "1.0.104"
+base64 = "0.23.1"
+bytes = "1.12.2"
+flate2 = "1.1.11"
+http = "1.5.0"
+http-body = "1.1.0"
+http-body-util = "0.1.5"
+hyper = { version = "1.12.0", features = ["http1", "server", "client", "http2"] }
+hyper-rustls = { version = "0.27.10", default-features = false, features = ["ring", "http1", "webpki-roots", "tls12", "logging", "http2"] }
+hyper-util = { version = "0.1.21", features = ["tokio", "client-legacy", "http1", "http2", "server", "server-auto"] }
+lru = "0.19.0"
+rand = "0.10.4"
+regex = "1"
+rcgen = { version = "0.14.10", features = ["pem", "ring", "x509-parser"] }
+lynkei-model = { version = "0.1.0", path = "../lynkei-model" }
+serde_json = "1.0.154"
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+thiserror = "2.0.21"
+time = "0.3.55"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "net", "io-util", "macros", "sync", "time", "fs"] }
+tower-service = "0.3"
+tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "tls12", "logging"] }
+tracing = "0.1.44"
+webpki-roots = "1.0.12"
+
+[dev-dependencies]
+futures-core = "0.3.34"
+futures-util = "0.3.34"
+http = "1.5.0"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "net", "io-util"] }
+tokio-tungstenite = "0.30.0"

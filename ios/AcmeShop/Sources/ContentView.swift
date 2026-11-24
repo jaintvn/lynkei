@@ -1,9 +1,9 @@
 import SwiftUI
 
 /// "Acme Shop" — a tiny stand-in for a real iOS app. It makes a realistic mix of API calls so you
-/// can watch Relay track them: list, detail, add to cart (JSON POST), a failing checkout (500),
-/// an expired token (401), a slow call and an image. Nothing here knows about Relay, except the
-/// optional `-relayProxy host:port` launch argument (see `makeSession`), which lets the Simulator
+/// can watch Lynkei track them: list, detail, add to cart (JSON POST), a failing checkout (500),
+/// an expired token (401), a slow call and an image. Nothing here knows about Lynkei, except the
+/// optional `-lynkeiProxy host:port` launch argument (see `makeSession`), which lets the Simulator
 /// demo run without changing the Mac's system proxy.
 ///
 /// Calls go to a local mock API (`scripts/demo-server.sh`), so the demo works offline and never
@@ -45,11 +45,11 @@ func resolve(_ call: Call, server: String) -> URL? {
     return URL(string: base + call.url)
 }
 
-/// A normal session, or one pointed at a proxy when launched with `-relayProxy 127.0.0.1:8888`.
+/// A normal session, or one pointed at a proxy when launched with `-lynkeiProxy 127.0.0.1:8888`.
 func makeSession() -> URLSession {
     let config = URLSessionConfiguration.default
     let args = ProcessInfo.processInfo.arguments
-    if let i = args.firstIndex(of: "-relayProxy"), i + 1 < args.count {
+    if let i = args.firstIndex(of: "-lynkeiProxy"), i + 1 < args.count {
         let parts = args[i + 1].split(separator: ":")
         if parts.count == 2, let port = Int(parts[1]) {
             config.connectionProxyDictionary = [
@@ -74,7 +74,7 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 14) {
             VStack(alignment: .leading, spacing: 2) {
                 Text("Acme Shop").font(.system(size: 30, weight: .bold)).foregroundStyle(brand)
-                Text("v3.4.1 · demo app for Relay").foregroundStyle(ink.opacity(0.6))
+                Text("v3.4.1 · demo app for Lynkei").foregroundStyle(ink.opacity(0.6))
             }
             HStack {
                 Text("Server").font(.system(size: 12, weight: .semibold)).foregroundStyle(ink.opacity(0.6))

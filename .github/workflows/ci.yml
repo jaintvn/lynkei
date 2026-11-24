@@ -42,4 +42,4 @@ jobs:
         with:
           workspaces: core
       - run: scripts/build-apple.sh
-      - run: swift build --package-path apple/Relay
+      - run: swift build --package-path apple/Lynkei

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Builds the Swift app and wraps it in a minimal Lynkei.app bundle (unsigned, for local development).
 # Usage: scripts/make-mac-app.sh [debug|release] [universal]   → apple/Lynkei/build/Lynkei.app
-# `universal` builds for Apple Silicon and Intel (run scripts/build-apple.sh with UNIVERSAL=1 first).
+# `universal` builds for Apple Silicon and Intel; `arm64` or `x86_64` builds a single-architecture app.
+# (Run scripts/build-apple.sh with UNIVERSAL=1 first for anything but arm64.)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -9,7 +10,10 @@ CONFIG="${1:-debug}"
 PKG="$ROOT/apple/Lynkei"
 
 ARCHS=()
-[ "${2:-}" = universal ] && ARCHS=(--arch arm64 --arch x86_64)
+case "${2:-}" in
+  universal) ARCHS=(--arch arm64 --arch x86_64) ;;
+  arm64|x86_64) ARCHS=(--arch "$2") ;;
+esac
 swift build --package-path "$PKG" -c "$CONFIG" ${ARCHS[@]+"${ARCHS[@]}"}
 BIN="$(swift build --package-path "$PKG" -c "$CONFIG" ${ARCHS[@]+"${ARCHS[@]}"} --show-bin-path)/Lynkei"
 

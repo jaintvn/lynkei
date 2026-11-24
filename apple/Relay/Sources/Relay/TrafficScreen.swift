@@ -17,21 +17,42 @@ struct TrafficScreen: View {
     @State private var deviceFilter: String?
     @State private var simulators: [BootedSimulator] = []
     @State private var simMessage: String?
+    @AppStorage("sidebarWidth") private var sidebarWidth = 220.0
+    @AppStorage("inspectorWidth") private var inspectorWidth = 440.0
+    @State private var centerW = 900.0
+    private static let centerMin = 520.0
 
     var body: some View {
         @Bindable var store = store
         VStack(spacing: 0) {
             AppHeader(screen: $screen) { toolbar(search: $store.search) }
-            HStack(spacing: 0) {
-                TrafficSidebar()
-                    .frame(width: 220)
-                    .background(Theme.panel)
-                    .overlay(alignment: .trailing) { Rectangle().fill(Theme.line).frame(width: 1) }
-                center
-                InspectorView(tx: store.selected)
-                    .frame(width: 440)
-                    .background(Theme.panel)
-                    .overlay(alignment: .leading) { Rectangle().fill(Theme.line).frame(width: 1) }
+            GeometryReader { geo in
+                let sideMax = min(360, max(180, geo.size.width - inspectorWidth - Self.centerMin))
+                let inspMax = min(760, max(320, geo.size.width - sidebarWidth - Self.centerMin))
+                let side = min(max(sidebarWidth, 160), sideMax)
+                let insp = min(max(inspectorWidth, 320), inspMax)
+                let centerWidth = geo.size.width - side - insp
+                HStack(spacing: 0) {
+                    TrafficSidebar()
+                        .frame(width: side)
+                        .background(Theme.panel)
+                        .overlay(alignment: .trailing) { Rectangle().fill(Theme.line).frame(width: 1) }
+                        .overlay(alignment: .trailing) {
+                            PaneDivider(width: $sidebarWidth, range: 160...sideMax, grows: .right)
+                        }
+                    center
+                        .environment(\.trafficColumns, TrafficColumns(centerWidth: centerWidth))
+                        .frame(width: max(centerWidth, 0), alignment: .leading)
+                        .clipped()
+                    InspectorView(tx: store.selected)
+                        .frame(width: insp)
+                        .background(Theme.panel)
+                        .overlay(alignment: .leading) { Rectangle().fill(Theme.line).frame(width: 1) }
+                        .overlay(alignment: .leading) {
+                            PaneDivider(width: $inspectorWidth, range: 320...inspMax, grows: .left)
+                        }
+                }
+                .onChange(of: centerWidth, initial: true) { _, w in centerW = w }
             }
         }
         .onAppear { simulators = Simulators.booted() }
@@ -417,14 +438,16 @@ struct TrafficScreen: View {
         .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
     }
 
+    private var cols: TrafficColumns { TrafficColumns(centerWidth: centerW) }
+
     private var tableHeader: some View {
         HStack(spacing: 8) {
             Text("STATUS").frame(width: 52, alignment: .leading)
             Text("METHOD").frame(width: 58, alignment: .leading)
             Text("ENDPOINT").frame(minWidth: 150, maxWidth: .infinity, alignment: .leading)
-            Text("HOST").frame(minWidth: 90, maxWidth: 150, alignment: .leading)
-            Text("DEVICE").frame(width: 70, alignment: .leading)
-            Text("DURATION").frame(width: 104, alignment: .leading)
+            if cols.showHost { Text("HOST").frame(minWidth: 90, maxWidth: cols.hostMax, alignment: .leading) }
+            if cols.showDevice { Text("DEVICE").frame(width: 70, alignment: .leading) }
+            if cols.showDuration { Text("DURATION").frame(width: 104, alignment: .leading) }
             Text("SIZE").frame(width: 58, alignment: .trailing)
             Color.clear.frame(width: 26)
         }
@@ -484,6 +507,7 @@ struct TrafficRow: View {
     let tx: FfiTransaction
     let selected: Bool
     var kinds: [String] = []
+    @Environment(\.trafficColumns) private var cols
 
     var body: some View {
         HStack(spacing: 8) {
@@ -506,16 +530,20 @@ struct TrafficRow: View {
                     .lineLimit(1).truncationMode(.middle)
             }
             .frame(minWidth: 150, maxWidth: .infinity, alignment: .leading)
-            Text(tx.host)
-                .font(.system(size: 12)).foregroundStyle(Theme.muted)
-                .lineLimit(1).truncationMode(.middle)
-                .frame(minWidth: 90, maxWidth: 150, alignment: .leading)
-            HStack(spacing: 4) {
-                PlatformIcon(platform: Analytics.platform(ofDevice: Analytics.deviceLabel(tx)), size: 10)
-                Text(Analytics.deviceLabel(tx)).font(.system(size: 12)).foregroundStyle(Theme.muted).lineLimit(1)
+            if cols.showHost {
+                Text(tx.host)
+                    .font(.system(size: 12)).foregroundStyle(Theme.muted)
+                    .lineLimit(1).truncationMode(.middle)
+                    .frame(minWidth: 90, maxWidth: cols.hostMax, alignment: .leading)
             }
-            .frame(width: 70, alignment: .leading)
-            DurationBar(ms: tx.durationMs).frame(width: 104)
+            if cols.showDevice {
+                HStack(spacing: 4) {
+                    PlatformIcon(platform: Analytics.platform(ofDevice: Analytics.deviceLabel(tx)), size: 10)
+                    Text(Analytics.deviceLabel(tx)).font(.system(size: 12)).foregroundStyle(Theme.muted).lineLimit(1)
+                }
+                .frame(width: 70, alignment: .leading)
+            }
+            if cols.showDuration { DurationBar(ms: tx.durationMs).frame(width: 104) }
             Text(tx.responseBodySize == 0 ? "—" : formatBytes(tx.responseBodySize))
                 .font(.system(size: 11.5, design: .monospaced))
                 .foregroundStyle(Theme.muted)
@@ -847,5 +875,58 @@ struct GroupHeader: View {
         .frame(height: 32)
         .background(Theme.raised.opacity(0.5))
         .overlay(alignment: .bottom) { Rectangle().fill(Theme.line).frame(height: 1) }
+    }
+}
+
+
+// MARK: - Resizable panes
+
+/// Which optional columns the call list has room for; the endpoint column takes whatever is left.
+struct TrafficColumns {
+    var centerWidth: Double = 900
+    var showHost: Bool { centerWidth >= 600 }
+    var showDevice: Bool { centerWidth >= 760 }
+    var showDuration: Bool { centerWidth >= 900 }
+    /// Hosts get more room as the list widens.
+    var hostMax: CGFloat { centerWidth >= 1100 ? 240 : 150 }
+}
+
+private struct TrafficColumnsKey: EnvironmentKey { static let defaultValue = TrafficColumns() }
+extension EnvironmentValues {
+    var trafficColumns: TrafficColumns {
+        get { self[TrafficColumnsKey.self] }
+        set { self[TrafficColumnsKey.self] = newValue }
+    }
+}
+
+/// A thin drag handle on a pane's edge. Drag to resize within `range`; double-click to reset.
+struct PaneDivider: View {
+    enum Grows { case left, right }
+    @Binding var width: Double
+    let range: ClosedRange<Double>
+    let grows: Grows
+    @State private var start: Double?
+    @State private var hover = false
+
+    var body: some View {
+        Rectangle().fill(hover || start != nil ? Theme.accent.opacity(0.5) : .clear)
+            .frame(width: 3)
+            .contentShape(Rectangle().inset(by: -3))
+            .offset(x: grows == .right ? 1 : -1)
+            .onHover { inside in
+                hover = inside
+                if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() }
+            }
+            .gesture(
+                DragGesture(minimumDistance: 1, coordinateSpace: .global)
+                    .onChanged { v in
+                        let base = start ?? width
+                        start = base
+                        let delta = grows == .right ? v.translation.width : -v.translation.width
+                        width = min(max(base + delta, range.lowerBound), range.upperBound)
+                    }
+                    .onEnded { _ in start = nil }
+            )
+            .onTapGesture(count: 2) { width = grows == .right ? 220 : 440 }
     }
 }

@@ -7,7 +7,7 @@
 **See, change and replay every API call your iOS and Android app makes.**<br/>
 An open-source, Charles-class HTTP(S) debugging proxy for mobile developers: native Mac app, Rust engine, built-in MCP server for AI agents.
 
-[![Download](https://img.shields.io/badge/Download-v0.2.0--test-6366f1?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/jaintvn/lynkei/releases)
+[![Download](https://img.shields.io/badge/Download-v0.4.0-6366f1?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/jaintvn/lynkei/releases)
 ![macOS 14+](https://img.shields.io/badge/macOS-14%2B-111827?style=for-the-badge&logo=apple)
 ![Apple Silicon + Intel](https://img.shields.io/badge/Apple%20Silicon%20%2B%20Intel-supported-111827?style=for-the-badge)
 ![Rust](https://img.shields.io/badge/Rust-engine-b7410e?style=for-the-badge&logo=rust&logoColor=white)

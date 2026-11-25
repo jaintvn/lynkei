@@ -7,10 +7,10 @@ license.workspace = true
 [dependencies]
 anyhow = "1.0.104"
 libc = "0.2.191"
-lynkei-devices = { version = "0.1.0", path = "../lynkei-devices" }
-lynkei-model = { version = "0.1.0", path = "../lynkei-model" }
-lynkei-proxy = { version = "0.1.0", path = "../lynkei-proxy" }
-lynkei-store = { version = "0.1.0", path = "../lynkei-store" }
+lynkei-devices = { version = "0.4.0", path = "../lynkei-devices" }
+lynkei-model = { version = "0.4.0", path = "../lynkei-model" }
+lynkei-proxy = { version = "0.4.0", path = "../lynkei-proxy" }
+lynkei-store = { version = "0.4.0", path = "../lynkei-store" }
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"

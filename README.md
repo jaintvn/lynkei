@@ -13,6 +13,7 @@ An open-source, Charles-class HTTP(S) debugging proxy for mobile developers: nat
 ![Rust](https://img.shields.io/badge/Rust-engine-b7410e?style=for-the-badge&logo=rust&logoColor=white)
 ![SwiftUI](https://img.shields.io/badge/SwiftUI-Mac%20app-f05138?style=for-the-badge&logo=swift&logoColor=white)
 ![MCP](https://img.shields.io/badge/MCP-agent%20ready-10b981?style=for-the-badge)
+[![License](https://img.shields.io/badge/License-Apache%202.0-2563eb?style=for-the-badge)](LICENSE)
 
 [**Download**](#-download) · [**Features**](#-everything-lynkei-does) · [**Connect an AI agent**](#-connect-an-ai-agent) · [**Quick start**](#-quick-start) · [**Full guide**](docs/GUIDE.md)
 
@@ -255,5 +256,9 @@ scripts/check.sh                           # fmt, clippy, tests and the Apple bu
 ## 📚 Learn more
 
 - **[Full guide](docs/GUIDE.md):** rule syntax, breakpoints from a terminal, rewrite sheet, search language and the MCP reference.
+
+## 📄 License
+
+Lynkei is licensed under the [Apache License 2.0](LICENSE). Copyright 2026 Jayanth VN.
 
 <div align="center"><sub>Made for people who are tired of guessing what their app sends.</sub></div>

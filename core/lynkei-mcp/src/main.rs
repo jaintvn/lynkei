@@ -295,6 +295,13 @@ fn tools() -> Vec<Value> {
             false,
         ),
         tool(
+            "set_device_proxy",
+            "Switch a device's proxy on or off without disconnecting it (off: the device goes straight to the internet; on: it is captured again). Turning it on for a device that is not connected connects it.",
+            json!({"id": s("device id from list_devices"), "enabled": b("true to capture, false to pass traffic straight through")}),
+            &["id", "enabled"],
+            false,
+        ),
+        tool(
             "disconnect_device",
             "Undo the connection for a device.",
             json!({"id": s("device id")}),
@@ -475,6 +482,18 @@ async fn call_tool(name: &str, a: &Value, ctx: &Ctx) -> Result<Value, String> {
         "proxy_stop" => rpc(socket, "proxy.stop", Value::Null).await,
         "list_devices" => rpc(socket, "devices.list", Value::Null).await,
         "connect_device" => rpc(socket, "devices.connect", json!({"id": req(a, "id")?})).await,
+        "set_device_proxy" => {
+            let enabled = a
+                .get("enabled")
+                .and_then(Value::as_bool)
+                .ok_or("`enabled` (true or false) is required")?;
+            rpc(
+                socket,
+                "devices.proxy",
+                json!({"id": req(a, "id")?, "enabled": enabled}),
+            )
+            .await
+        }
         "disconnect_device" => {
             rpc(socket, "devices.disconnect", json!({"id": req(a, "id")?})).await
         }

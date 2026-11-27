@@ -7,7 +7,7 @@
 //!   lynkei rules check <file> | push <file> | pull
 //!   lynkei proxy start [--port 8888] | stop
 //!   lynkei system-proxy on | off | status
-//!   lynkei devices [list] | connect <id> | disconnect <id>
+//!   lynkei devices [list] | connect <id> | proxy <id> on|off | disconnect <id>
 //!
 //! Standalone:
 //!   lynkei serve [--port 8888] [--listen 0.0.0.0] [--data-dir DIR] [--json]
@@ -519,10 +519,10 @@ async fn control(args: &Args, data_dir: &std::path::Path) -> Result<()> {
                         d["name"].as_str().unwrap_or(""),
                         d["os"].as_str().unwrap_or(""),
                         d["kind"].as_str().unwrap_or(""),
-                        if d["connected"].as_bool() == Some(true) {
-                            "  ● connected"
-                        } else {
-                            ""
+                        match (d["connected"].as_bool(), d["proxy_on"].as_bool()) {
+                            (Some(true), Some(true)) => "  ● connected",
+                            (Some(true), _) => "  ○ connected, proxy off",
+                            _ => "",
                         }
                     );
                 }
@@ -560,6 +560,18 @@ async fn control(args: &Args, data_dir: &std::path::Path) -> Result<()> {
             if r["ready"].as_bool() != Some(true) {
                 std::process::exit(2);
             }
+        }
+        ("devices", "proxy") => {
+            let usage = "usage: lynkei devices proxy <id> on|off";
+            let id = args.positional.get(1).context(usage)?;
+            let enabled = match args.positional.get(2).map(String::as_str) {
+                Some("on") => true,
+                Some("off") => false,
+                _ => anyhow::bail!(usage),
+            };
+            c.call("devices.proxy", json!({"id": id, "enabled": enabled}))
+                .await?;
+            println!("proxy {}", if enabled { "on" } else { "off" });
         }
         ("devices", "disconnect") => {
             let id = args

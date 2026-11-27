@@ -3,7 +3,7 @@ resolver = "3"
 members = ["lynkei-model", "lynkei-proxy", "lynkei-ffi", "lynkei-cli", "lynkei-netstack", "lynkei-store", "lynkei-control", "lynkeid", "lynkei-bench", "lynkei-devices", "lynkei-mcp"]
 
 [workspace.package]
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
 license = "Apache-2.0"
 

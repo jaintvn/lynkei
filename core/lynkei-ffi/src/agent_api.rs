@@ -464,6 +464,27 @@ async fn handle(e: Arc<LynkeiEngine>, method: &str, params: Value) -> Reply {
                 "connected_at_ms": r.connected_at_ms,
             }))
         }
+        "devices.proxy" => {
+            let id = text(&params, "id").to_string();
+            if id.is_empty() {
+                return Err(bad("`id` is required"));
+            }
+            let enabled = params
+                .get("enabled")
+                .and_then(Value::as_bool)
+                .ok_or_else(|| bad("`enabled` (true or false) is required"))?;
+            let port = proxy_port(&e).ok_or_else(|| fail("the proxy has not started yet"))?;
+            let devices = e.devices.clone();
+            let r = blocking(move || devices.set_proxy(&id, enabled, port))
+                .await?
+                .map_err(|x| fail(format!("{x:#}")))?;
+            Ok(json!({
+                "device": r.device,
+                "checklist": r.checklist,
+                "ready": r.checklist.ready(),
+                "connected_at_ms": r.connected_at_ms,
+            }))
+        }
         "devices.disconnect" => {
             let id = text(&params, "id").to_string();
             if id.is_empty() {

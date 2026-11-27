@@ -13,8 +13,8 @@ http-body-util = "0.1.5"
 hyper = { version = "1.12.0", features = ["http1", "server", "client"] }
 hyper-util = { version = "0.1.21", features = ["tokio"] }
 rcgen = { version = "0.14.10", features = ["pem", "ring"] }
-lynkei-proxy = { version = "0.4.0", path = "../lynkei-proxy" }
-lynkei-store = { version = "0.4.0", path = "../lynkei-store" }
+lynkei-proxy = { version = "0.4.1", path = "../lynkei-proxy" }
+lynkei-store = { version = "0.4.1", path = "../lynkei-store" }
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std"] }
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "net", "io-util", "time"] }
 tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring"] }

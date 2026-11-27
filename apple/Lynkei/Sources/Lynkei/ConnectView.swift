@@ -129,24 +129,38 @@ struct DeviceCard: View {
                     Text(device.os).font(.system(size: 12)).foregroundStyle(Theme.muted)
                 }
             }
+            if connected {
+                HStack {
+                    Text("Send traffic through Lynkei").font(.system(size: 12.5, weight: .medium))
+                    Spacer()
+                    Toggle("", isOn: Binding(
+                        get: { device.proxyOn },
+                        set: { on in Task { await store.setProxy(device, on: on) } }
+                    ))
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+                    .labelsHidden()
+                    .disabled(busy)
+                }
+                .padding(.horizontal, 10)
+                .frame(height: 34)
+                .background(RoundedRectangle(cornerRadius: 9).fill(Theme.panel))
+                .overlay(RoundedRectangle(cornerRadius: 9).stroke(Theme.line))
+            }
             VStack(alignment: .leading, spacing: 8) {
-                ChecklistRow(title: "Proxy", step: result?.proxy, busy: busy)
+                ChecklistRow(title: "Proxy", step: proxyStep(result, connected: connected), busy: busy)
                 ChecklistRow(title: "Certificate trusted", step: result?.certificate, busy: busy)
-                ChecklistRow(
-                    title: "Traffic seen",
-                    step: connected ? FfiStep(state: trafficSeen ? "done" : "pending", detail: trafficSeen ? "Requests are flowing" : "Waiting for the first request. Open an app on the device and use it.") : nil,
-                    busy: false
-                )
+                ChecklistRow(title: "Traffic seen", step: trafficStep(connected: connected), busy: false)
             }
             if let message = store.errors[device.id] {
                 Text(message).font(.system(size: 12)).foregroundStyle(Theme.s5xx)
             }
-            if device.kind == "ios_simulator", connected, !MacProxyStatus.shared.isLynkei, MacProxyStatus.shared.state != .unknown {
+            if device.kind == "ios_simulator", connected, device.proxyOn, !MacProxyStatus.shared.isLynkei, MacProxyStatus.shared.state != .unknown {
                 HStack(alignment: .top, spacing: 8) {
                     Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Theme.s4xx)
                     VStack(alignment: .leading, spacing: 4) {
                         Text("The Mac's proxy is off, so this simulator is not going through Lynkei.").font(.system(size: 12, weight: .medium))
-                        Button("Turn the proxy on again") { Task { await store.connect(device) } }
+                        Button("Turn the proxy on again") { Task { await store.setProxy(device, on: true) } }
                             .buttonStyle(PillButtonStyle()).font(.system(size: 12, weight: .medium))
                     }
                 }
@@ -170,6 +184,19 @@ struct DeviceCard: View {
         .padding(18)
         .background(RoundedRectangle(cornerRadius: 14).fill(Theme.raised))
         .overlay(RoundedRectangle(cornerRadius: 14).stroke(connected ? Theme.accent.opacity(0.55) : Theme.line))
+    }
+
+    /// What the Proxy row says: the real state of the device, not only what happened when it connected.
+    private func proxyStep(_ result: FfiConnectResult?, connected: Bool) -> FfiStep? {
+        guard connected, !device.proxyOn else { return result?.proxy }
+        if let proxy = result?.proxy, proxy.state != "done" { return proxy }
+        return FfiStep(state: "needs_action", detail: "The proxy is not set on this device (switched off, cleared by hand, or the device restarted). Turn the switch on to capture again.")
+    }
+
+    private func trafficStep(connected: Bool) -> FfiStep? {
+        guard connected else { return nil }
+        if !device.proxyOn { return FfiStep(state: "pending", detail: "The proxy is off, so nothing is captured from this device.") }
+        return FfiStep(state: trafficSeen ? "done" : "pending", detail: trafficSeen ? "Requests are flowing" : "Waiting for the first request. Open an app on the device and use it.")
     }
 
     private var icon: String {

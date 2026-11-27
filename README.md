@@ -180,6 +180,16 @@ Lynkei runs an [MCP](https://modelcontextprotocol.io) server inside the app, at 
 - Agents work while Lynkei is open. Close the app and they simply can't connect until you reopen it; no reconfiguring.
 - An agent that only supports local (stdio) servers can bridge with `npx -y mcp-remote http://127.0.0.1:8890/mcp`.
 
+### 🧠 Add the Lynkei skill (zero setup)
+
+A ready-made agent skill in [`skills/lynkei`](skills/lynkei/SKILL.md) teaches an AI assistant to install Lynkei, add the MCP server, connect a simulator or phone and debug failing calls, so you only say what you want. For Claude Code, copy the folder into your skills directory:
+
+```bash
+mkdir -p ~/.claude/skills && cp -R skills/lynkei ~/.claude/skills/
+```
+
+Then ask: *"Set up Lynkei and find out why my app's login call fails."*
+
 ### What agents get
 
 | | |

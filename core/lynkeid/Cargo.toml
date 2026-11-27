@@ -6,7 +6,7 @@ license.workspace = true
 
 [dependencies]
 anyhow = "1.0.104"
-lynkei-control = { version = "0.4.0", path = "../lynkei-control" }
+lynkei-control = { version = "0.4.1", path = "../lynkei-control" }
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "signal"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }

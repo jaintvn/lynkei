@@ -493,6 +493,29 @@ impl Engine {
                     json!({ "device": r.device, "checklist": r.checklist, "ready": r.checklist.ready(), "connected_at_ms": r.connected_at_ms }),
                 )
             }
+            "devices.proxy" => {
+                let id = params
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| bad("`id` is required"))?
+                    .to_string();
+                let enabled = params
+                    .get("enabled")
+                    .and_then(Value::as_bool)
+                    .ok_or_else(|| bad("`enabled` (true or false) is required"))?;
+                let port = self
+                    .proxy_port()
+                    .await
+                    .ok_or_else(|| RpcError::new(RpcError::ENGINE, "start the proxy first"))?;
+                let devices = self.devices.clone();
+                let r = tokio::task::spawn_blocking(move || devices.set_proxy(&id, enabled, port))
+                    .await
+                    .map_err(|e| engine_err(e.into()))?
+                    .map_err(engine_err)?;
+                Ok(
+                    json!({ "device": r.device, "checklist": r.checklist, "ready": r.checklist.ready(), "connected_at_ms": r.connected_at_ms }),
+                )
+            }
             "devices.disconnect" => {
                 let id = params
                     .get("id")

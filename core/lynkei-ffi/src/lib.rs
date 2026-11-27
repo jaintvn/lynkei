@@ -217,6 +217,8 @@ pub struct FfiDevice {
     pub name: String,
     pub os: String,
     pub connected: bool,
+    /// Whether traffic from the device goes through Lynkei right now.
+    pub proxy_on: bool,
 }
 
 /// One line of the connect checklist.
@@ -270,6 +272,7 @@ fn device(d: lynkei_devices::Device) -> FfiDevice {
         name: d.name,
         os: d.os,
         connected: d.connected,
+        proxy_on: d.proxy_on,
     }
 }
 
@@ -994,6 +997,33 @@ impl LynkeiEngine {
         let r = self.devices.result(&id)?;
         let ready = r.checklist.ready();
         Some(FfiConnectResult {
+            device: device(r.device),
+            proxy: step(r.checklist.proxy),
+            certificate: step(r.checklist.certificate),
+            ready,
+            connected_at_ms: r.connected_at_ms,
+        })
+    }
+
+    /// Turns the proxy on a device on or off without disconnecting it. Turning it on for a device
+    /// that is not connected connects it.
+    pub fn set_device_proxy(
+        &self,
+        id: String,
+        enabled: bool,
+    ) -> Result<FfiConnectResult, LynkeiError> {
+        let port = self
+            .handle
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|h| h.local_addr.port())
+            .ok_or_else(|| LynkeiError::Failed {
+                reason: "start the engine first".into(),
+            })?;
+        let r = self.devices.set_proxy(&id, enabled, port)?;
+        let ready = r.checklist.ready();
+        Ok(FfiConnectResult {
             device: device(r.device),
             proxy: step(r.checklist.proxy),
             certificate: step(r.checklist.certificate),

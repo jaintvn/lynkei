@@ -77,6 +77,24 @@ final class DeviceStore {
         await refresh()
     }
 
+    /// Switches the proxy on a device on or off. The device stays connected, so flipping it back is quick.
+    func setProxy(_ device: FfiDevice, on: Bool) async {
+        guard let engine = engine(), !busy.contains(device.id) else { return }
+        busy.insert(device.id)
+        errors[device.id] = nil
+        let id = device.id
+        if on { userDisconnected.remove(id) } else { userDisconnected.insert(id) }
+        let outcome: Result<FfiConnectResult, Error> = await Task.detached {
+            Result { try engine.setDeviceProxy(id: id, enabled: on) }
+        }.value
+        switch outcome {
+        case .success(let r): results[id] = r
+        case .failure(let e): errors[id] = "\(e)"
+        }
+        busy.remove(id)
+        await refresh()
+    }
+
     func disconnect(_ device: FfiDevice) async {
         guard let engine = engine(), !busy.contains(device.id) else { return }
         busy.insert(device.id)

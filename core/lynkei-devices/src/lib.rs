@@ -11,7 +11,7 @@
 //! - **iPhone / iPad over Wi-Fi**: not auto-detectable; [`wifi_setup_url`] gives the page the QR
 //!   code points at.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -102,6 +102,10 @@ pub struct Device {
     pub os: String,
     /// Whether the device is currently connected to Lynkei.
     pub connected: bool,
+    /// Whether the device is sending its traffic through Lynkei right now. A connected device can
+    /// have its proxy switched off (and on again) without disconnecting.
+    #[serde(default)]
+    pub proxy_on: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -134,6 +138,14 @@ pub struct ConnectResult {
     pub connected_at_ms: u64,
 }
 
+fn is_simulator_id(id: &str) -> bool {
+    id.len() == 36 && id.contains('-')
+}
+
+fn port_of(connected: &Mutex<HashMap<String, (u16, u64, Checklist)>>, id: &str) -> Option<u16> {
+    connected.lock().unwrap().get(id).map(|(p, _, _)| *p)
+}
+
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -149,6 +161,8 @@ pub struct DeviceManager {
     system_proxy: Option<Arc<dyn SystemProxySwitch>>,
     ca_path: PathBuf,
     connected: Mutex<HashMap<String, (u16, u64, Checklist)>>,
+    /// Connected devices whose proxy is switched off for now (they stay connected).
+    paused: Mutex<HashSet<String>>,
     /// Android devices whose proxy Lynkei set and has not yet undone (serial → port). Kept on disk so
     /// a device unplugged while connected is cleaned up the next time Lynkei sees it, instead of
     /// being left with a proxy pointing at nothing (no internet).
@@ -169,6 +183,7 @@ impl DeviceManager {
             system_proxy,
             ca_path: ca_path.to_path_buf(),
             connected: Mutex::new(HashMap::new()),
+            paused: Mutex::new(HashSet::new()),
             pending_cleanup: Mutex::new(HashMap::new()),
             state_file: None,
         }
@@ -271,9 +286,22 @@ impl DeviceManager {
             }
         }
         self.clean_up_leftovers(&out);
-        let connected = self.connected.lock().unwrap();
+        let connected = self.connected.lock().unwrap().clone();
+        let paused = self.paused.lock().unwrap().clone();
         for d in &mut out {
-            d.connected = connected.contains_key(&d.id);
+            let entry = connected.get(&d.id);
+            d.connected = entry.is_some();
+            d.proxy_on = match entry {
+                None => false,
+                Some(_) if paused.contains(&d.id) => false,
+                // Android: believe the device, not our own bookkeeping (the proxy may have been
+                // cleared by hand, or by a reboot).
+                Some((port, _, _)) if d.kind != Kind::IosSimulator => self
+                    .adb(&d.id, &["shell", "settings", "get", "global", "http_proxy"])
+                    .map(|o| o.stdout.trim() == format!("127.0.0.1:{port}"))
+                    .unwrap_or(false),
+                Some(_) => true,
+            };
         }
         out
     }
@@ -289,6 +317,7 @@ impl DeviceManager {
             Kind::AndroidEmulator | Kind::AndroidUsb => self.connect_android(&device, port),
         };
         let at = now_ms();
+        self.paused.lock().unwrap().remove(&device.id);
         self.connected
             .lock()
             .unwrap()
@@ -296,6 +325,7 @@ impl DeviceManager {
         Ok(ConnectResult {
             device: Device {
                 connected: true,
+                proxy_on: matches!(checklist.proxy, StepState::Done(_)),
                 ..device
             },
             checklist,
@@ -305,34 +335,98 @@ impl DeviceManager {
 
     pub fn disconnect(&self, id: &str) -> Result<()> {
         let entry = self.connected.lock().unwrap().remove(id);
+        self.paused.lock().unwrap().remove(id);
         let (port, _, _) = entry.ok_or_else(|| anyhow!("{id} is not connected"))?;
-        if id.contains('-') && id.len() == 36 {
+        if is_simulator_id(id) {
             // A simulator: the system proxy is shared, so turn it off with the last one.
             let any_sim = self
                 .connected
                 .lock()
                 .unwrap()
                 .keys()
-                .any(|k| k.len() == 36 && k.contains('-'));
+                .any(|k| is_simulator_id(k));
             if !any_sim && let Some(sp) = &self.system_proxy {
                 sp.disable()?;
             }
         } else {
-            let cleared = self
-                .adb(
-                    id,
-                    &["shell", "settings", "put", "global", "http_proxy", ":0"],
-                )
-                .map(|o| o.ok)
-                .unwrap_or(false);
-            let _ = self.adb(id, &["reverse", "--remove", &format!("tcp:{port}")]);
-            // Unplugged devices stay on the cleanup list until we can really undo their proxy.
-            if cleared {
-                self.pending_cleanup.lock().unwrap().remove(id);
-                self.save_pending();
-            }
+            self.clear_android_proxy(id, port);
         }
         Ok(())
+    }
+
+    /// Switches the proxy on a device on or off. A connected device stays connected: its
+    /// certificate is kept and only the proxy changes, so it is quick to flip back and forth.
+    /// Turning it on for a device that is not connected connects it. Turning it off also clears a
+    /// proxy Lynkei left on an Android device that it no longer tracks.
+    pub fn set_proxy(&self, id: &str, enabled: bool, port: u16) -> Result<ConnectResult> {
+        let is_connected = self.connected.lock().unwrap().contains_key(id);
+        if enabled && !is_connected {
+            return self.connect(id, port);
+        }
+        let device = self
+            .list()
+            .into_iter()
+            .find(|d| d.id == id)
+            .ok_or_else(|| anyhow!("device {id} is not running or attached"))?;
+        let android = device.kind != Kind::IosSimulator;
+        let proxy = if enabled {
+            self.paused.lock().unwrap().remove(id);
+            if android {
+                self.apply_android_proxy(id, port)
+            } else {
+                self.apply_simulator_proxy(port)
+            }
+        } else {
+            if android {
+                self.clear_android_proxy(id, port_of(&self.connected, id).unwrap_or(port));
+            }
+            if is_connected {
+                self.paused.lock().unwrap().insert(id.to_string());
+            }
+            if !android {
+                // The Mac's proxy is shared by every simulator: turn it off with the last one.
+                let others_on = {
+                    let connected = self.connected.lock().unwrap();
+                    let paused = self.paused.lock().unwrap();
+                    connected
+                        .keys()
+                        .any(|k| is_simulator_id(k) && !paused.contains(k))
+                };
+                if !others_on && let Some(sp) = &self.system_proxy {
+                    sp.disable()?;
+                }
+            }
+            StepState::NeedsAction("Proxy is off for this device. Turn it on to capture.".into())
+        };
+        let certificate = {
+            let mut connected = self.connected.lock().unwrap();
+            match connected.get_mut(id) {
+                Some((p, _, checklist)) => {
+                    if enabled {
+                        *p = port;
+                    }
+                    checklist.proxy = proxy.clone();
+                    checklist.certificate.clone()
+                }
+                None => StepState::Pending,
+            }
+        };
+        let at = self
+            .connected
+            .lock()
+            .unwrap()
+            .get(id)
+            .map(|(_, at, _)| *at)
+            .unwrap_or_else(now_ms);
+        Ok(ConnectResult {
+            device: Device {
+                connected: is_connected,
+                proxy_on: enabled && matches!(proxy, StepState::Done(_)),
+                ..device
+            },
+            checklist: Checklist { proxy, certificate },
+            connected_at_ms: at,
+        })
     }
 
     /// Undo everything on every connected device (call on shutdown).
@@ -382,17 +476,7 @@ impl DeviceManager {
             Ok(o) => StepState::Failed(first_line(&o.stderr)),
             Err(e) => StepState::Failed(e.to_string()),
         };
-        let proxy = match &self.system_proxy {
-            Some(sp) => match sp.enable("127.0.0.1", port) {
-                Ok(()) => StepState::Done(format!(
-                    "Mac system proxy → 127.0.0.1:{port} (simulators use it)"
-                )),
-                Err(e) => StepState::Failed(format!("{e:#}")),
-            },
-            None => StepState::NeedsAction(format!(
-                "Set this Mac's HTTP and HTTPS proxy to 127.0.0.1:{port}"
-            )),
-        };
+        let proxy = self.apply_simulator_proxy(port);
         Checklist { proxy, certificate }
     }
 
@@ -402,11 +486,17 @@ impl DeviceManager {
         // Certificate first: `adb root` restarts adbd on rootable emulators, which drops every
         // `adb reverse` tunnel — so the tunnel must be created after it.
         let certificate = self.install_android_ca(d);
+        let proxy = self.apply_android_proxy(&d.id, port);
+        Checklist { proxy, certificate }
+    }
+
+    /// Sets the device proxy to Lynkei through an `adb reverse` tunnel.
+    fn apply_android_proxy(&self, id: &str, port: u16) -> StepState {
         let p = port.to_string();
         let tcp = format!("tcp:{p}");
-        let proxy = match self.adb(&d.id, &["reverse", &tcp, &tcp]) {
+        let proxy = match self.adb(id, &["reverse", &tcp, &tcp]) {
             Ok(o) if o.ok => match self.adb(
-                &d.id,
+                id,
                 &[
                     "shell",
                     "settings",
@@ -429,10 +519,41 @@ impl DeviceManager {
             self.pending_cleanup
                 .lock()
                 .unwrap()
-                .insert(d.id.clone(), port);
+                .insert(id.to_string(), port);
             self.save_pending();
         }
-        Checklist { proxy, certificate }
+        proxy
+    }
+
+    /// Removes the device proxy and the tunnel. Returns whether the proxy setting was cleared.
+    fn clear_android_proxy(&self, id: &str, port: u16) -> bool {
+        let cleared = self
+            .adb(
+                id,
+                &["shell", "settings", "put", "global", "http_proxy", ":0"],
+            )
+            .map(|o| o.ok)
+            .unwrap_or(false);
+        let _ = self.adb(id, &["reverse", "--remove", &format!("tcp:{port}")]);
+        if cleared {
+            self.pending_cleanup.lock().unwrap().remove(id);
+            self.save_pending();
+        }
+        cleared
+    }
+
+    fn apply_simulator_proxy(&self, port: u16) -> StepState {
+        match &self.system_proxy {
+            Some(sp) => match sp.enable("127.0.0.1", port) {
+                Ok(()) => StepState::Done(format!(
+                    "Mac system proxy → 127.0.0.1:{port} (simulators use it)"
+                )),
+                Err(e) => StepState::Failed(format!("{e:#}")),
+            },
+            None => StepState::NeedsAction(format!(
+                "Set this Mac's HTTP and HTTPS proxy to 127.0.0.1:{port}"
+            )),
+        }
     }
 
     fn install_android_ca(&self, d: &Device) -> StepState {
@@ -575,6 +696,7 @@ pub fn parse_simctl(json: &str) -> Vec<Device> {
                     name: name.into(),
                     os: os.clone(),
                     connected: false,
+                    proxy_on: false,
                 });
             }
         }
@@ -609,6 +731,7 @@ pub fn parse_adb_devices(text: &str) -> Vec<Device> {
                 name: model,
                 os: "Android".into(),
                 connected: false,
+                proxy_on: false,
             })
         })
         .collect()
@@ -835,6 +958,116 @@ mod tests {
         );
         m.disconnect("emulator-5554").unwrap();
         assert!(fake.saw("http_proxy :0") && fake.saw("reverse --remove tcp:8888"));
+    }
+
+    #[test]
+    fn the_proxy_can_be_switched_off_and_on_while_the_device_stays_connected() {
+        let fake = Fake::new(vec![
+            ("devices -l", ok(ADB)),
+            ("getprop ro.build.version.release", ok("15\n")),
+            ("subject_hash_old", ok("eadedf90\n")),
+            ("settings get global http_proxy", ok("127.0.0.1:8888\n")),
+        ]);
+        let m = DeviceManager::new(
+            fake.clone(),
+            Some("adb".into()),
+            None,
+            Path::new("/tmp/ca.pem"),
+        );
+        let id = "emulator-5554";
+        let put = "settings put global http_proxy 127.0.0.1:8888";
+        let count = |needle: &str| {
+            fake.log
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|l| l.contains(needle))
+                .count()
+        };
+        m.connect(id, 8888).unwrap();
+        let certificate_runs = count("subject_hash_old");
+        assert!(m.list()[0].proxy_on, "the device proxy matches Lynkei's");
+        assert_eq!(count(put), 1);
+
+        let off = m.set_proxy(id, false, 8888).unwrap();
+        assert!(fake.saw("http_proxy :0") && fake.saw("reverse --remove tcp:8888"));
+        assert!(off.device.connected && !off.device.proxy_on);
+        assert!(matches!(off.checklist.proxy, StepState::NeedsAction(_)));
+        let listed = m.list();
+        assert!(
+            listed[0].connected && !listed[0].proxy_on,
+            "still connected, proxy off"
+        );
+
+        let on = m.set_proxy(id, true, 8888).unwrap();
+        assert_eq!(
+            count(put),
+            2,
+            "turning it back on re-applies the proxy only"
+        );
+        assert!(on.device.proxy_on && matches!(on.checklist.proxy, StepState::Done(_)));
+        assert!(m.list()[0].proxy_on);
+        assert_eq!(
+            count("subject_hash_old"),
+            certificate_runs,
+            "the certificate is not installed again"
+        );
+    }
+
+    #[test]
+    fn an_android_proxy_that_was_cleared_by_hand_is_not_reported_as_on() {
+        let fake = Fake::new(vec![
+            ("devices -l", ok(ADB)),
+            ("getprop ro.build.version.release", ok("15\n")),
+            ("subject_hash_old", ok("eadedf90\n")),
+            ("settings get global http_proxy", ok(":0\n")),
+        ]);
+        let m = DeviceManager::new(fake, Some("adb".into()), None, Path::new("/tmp/ca.pem"));
+        m.connect("emulator-5554", 8888).unwrap();
+        let d = &m.list()[0];
+        assert!(d.connected && !d.proxy_on);
+    }
+
+    #[test]
+    fn turning_the_proxy_off_clears_one_lynkei_no_longer_tracks() {
+        let fake = Fake::new(vec![
+            ("devices -l", ok(ADB)),
+            ("getprop ro.build.version.release", ok("15\n")),
+        ]);
+        let m = DeviceManager::new(
+            fake.clone(),
+            Some("adb".into()),
+            None,
+            Path::new("/tmp/ca.pem"),
+        );
+        let r = m.set_proxy("emulator-5554", false, 8888).unwrap();
+        assert!(fake.saw("-s emulator-5554 shell settings put global http_proxy :0"));
+        assert!(!r.device.connected && !r.device.proxy_on);
+        assert!(m.list().iter().all(|d| !d.connected));
+    }
+
+    #[test]
+    fn switching_a_simulator_off_and_on_toggles_the_mac_proxy() {
+        let fake = Fake::new(vec![("simctl list", ok(SIMCTL))]);
+        let sw = Arc::new(FakeSwitch::default());
+        let m = DeviceManager::new(
+            fake,
+            None,
+            Some(sw.clone()),
+            Path::new("/tmp/lynkei-ca.pem"),
+        );
+        let id = "6507CF9D-A8F8-4285-96CF-53780AE0EB92";
+        m.connect(id, 8888).unwrap();
+        assert!(m.list()[0].proxy_on);
+        let off = m.set_proxy(id, false, 8888).unwrap();
+        assert!(off.device.connected && !off.device.proxy_on);
+        assert!(!m.list()[0].proxy_on && m.list()[0].connected);
+        m.set_proxy(id, true, 8888).unwrap();
+        assert_eq!(
+            *sw.0.lock().unwrap(),
+            vec!["on 127.0.0.1:8888", "off", "on 127.0.0.1:8888"]
+        );
+        assert!(m.list()[0].proxy_on);
     }
 
     #[test]

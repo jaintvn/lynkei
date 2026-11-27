@@ -184,7 +184,7 @@ Lynkei runs an [MCP](https://modelcontextprotocol.io) server inside the app, at 
 
 | | |
 |---|---|
-| **28 tools** | `status`, `list_devices`, `connect_device`, `search_traffic`, `get_transaction`, `add_rule`, `toggle_rule`, `send_request`, `repeat_request`, `list_paused`, `resume_paused`, `record_scenario`, `replay_scenario`, `set_throttle`, `set_ssl_decrypt`, … |
+| **29 tools** | `status`, `list_devices`, `connect_device`, `set_device_proxy`, `search_traffic`, `get_transaction`, `add_rule`, `toggle_rule`, `send_request`, `repeat_request`, `list_paused`, `resume_paused`, `record_scenario`, `replay_scenario`, `set_throttle`, `set_ssl_decrypt`, … |
 | **Resources** | `lynkei://status`, `rules`, `devices`, `paused`, `traffic` (also `lynkei://traffic?query=status:5xx`) |
 | **Prompts** | `debug_failing_endpoint`, `mock_api_offline`, `find_slow_calls` |
 | **Safe by default** | `Authorization`, cookies and API-key headers are redacted and bodies left out unless the agent explicitly asks for them. |
@@ -192,7 +192,7 @@ Lynkei runs an [MCP](https://modelcontextprotocol.io) server inside the app, at 
 For CI or a machine without the app, run the headless engine and the same server: `lynkeid &` then `lynkei-mcp --http`, or point an agent at the `lynkei-mcp` binary (stdio); it starts the engine itself. `lynkei-mcp doctor` checks the setup. Details are in the [guide](docs/GUIDE.md#ai-agents-mcp).
 
 ---|---|
-| **28 tools** | `status`, `list_devices`, `connect_device`, `search_traffic`, `get_transaction`, `add_rule`, `toggle_rule`, `send_request`, `repeat_request`, `list_paused`, `resume_paused`, `record_scenario`, `replay_scenario`, `set_throttle`, `set_ssl_decrypt`, … |
+| **29 tools** | `status`, `list_devices`, `connect_device`, `set_device_proxy`, `search_traffic`, `get_transaction`, `add_rule`, `toggle_rule`, `send_request`, `repeat_request`, `list_paused`, `resume_paused`, `record_scenario`, `replay_scenario`, `set_throttle`, `set_ssl_decrypt`, … |
 | **Live resources** | `lynkei://status`, `rules`, `devices`, `paused`, `traffic` (also `lynkei://traffic?query=status:5xx`). Agents can subscribe and are told when a matching call arrives or a request is held. |
 | **Prompts** | `debug_failing_endpoint`, `mock_api_offline`, `find_slow_calls` |
 | **Safe by default** | `Authorization`, cookies and API-key headers are redacted and bodies left out unless the agent explicitly asks for them. |

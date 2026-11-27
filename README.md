@@ -52,11 +52,14 @@ Grab the build for your Mac from the [latest release](https://github.com/jaintvn
 > [!NOTE]
 > The builds are not notarized yet. If macOS blocks the app, unzip it and run `xattr -dr com.apple.quarantine Lynkei.app`, or use *System Settings → Privacy & Security → Open Anyway*. Downloading with `gh release download` or `curl` avoids the block.
 
+> [!TIP]
+> **Zero setup with an AI assistant.** Add the [Lynkei skill](skills/lynkei/SKILL.md) and just ask: *"Set up Lynkei and connect my iPhone simulator."* The assistant downloads the right build for your Mac (after asking you), installs it, adds the MCP server and connects the device. For Claude Code: `mkdir -p ~/.claude/skills && cp -R skills/lynkei ~/.claude/skills/`. More in [Connect an AI agent](#-connect-an-ai-agent).
+
 ---
 
 ## 🚀 Quick start
 
-1. **Open Lynkei.** It starts a proxy on `127.0.0.1:8888` and creates its own certificate authority.
+1. **Open Lynkei** (or let the [skill](skills/lynkei/SKILL.md) install and open it). It starts a proxy on `127.0.0.1:8888` and creates its own certificate authority.
 2. Click **Connect device**. Booted simulators and emulators show up as cards. Press **Connect**.
 3. Use your app. Calls appear live, with headers, bodies, timing and the rules that touched them.
 
@@ -179,6 +182,16 @@ Lynkei runs an [MCP](https://modelcontextprotocol.io) server inside the app, at 
 - If something else already uses port `8890`, the sheet says so and lets you pick another port; update your agent once.
 - Agents work while Lynkei is open. Close the app and they simply can't connect until you reopen it; no reconfiguring.
 - An agent that only supports local (stdio) servers can bridge with `npx -y mcp-remote http://127.0.0.1:8890/mcp`.
+
+### 🧠 Add the Lynkei skill (zero setup)
+
+A ready-made agent skill in [`skills/lynkei`](skills/lynkei/SKILL.md) teaches an AI assistant to install Lynkei, add the MCP server, connect a simulator or phone and debug failing calls, so you only say what you want. For Claude Code, copy the folder into your skills directory:
+
+```bash
+mkdir -p ~/.claude/skills && cp -R skills/lynkei ~/.claude/skills/
+```
+
+Then ask: *"Set up Lynkei and find out why my app's login call fails."*
 
 ### What agents get
 

@@ -445,6 +445,20 @@ fn http_connector(cfg: &ProxyConfig, spoofs: &Spoofs) -> Connector {
     http
 }
 
+/// The certificates the operating system trusts (on macOS: the keychains and their trust
+/// settings), read once.
+fn system_roots() -> &'static [rustls::pki_types::CertificateDer<'static>] {
+    static ROOTS: std::sync::OnceLock<Vec<rustls::pki_types::CertificateDer<'static>>> =
+        std::sync::OnceLock::new();
+    ROOTS.get_or_init(|| {
+        let loaded = rustls_native_certs::load_native_certs();
+        for e in &loaded.errors {
+            tracing::warn!("reading a system certificate: {e}");
+        }
+        loaded.certs
+    })
+}
+
 fn build_upstream_client(
     provider: Arc<CryptoProvider>,
     cfg: &ProxyConfig,
@@ -453,6 +467,14 @@ fn build_upstream_client(
 ) -> Result<UpstreamClient> {
     let mut roots = RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    // Also trust what the operating system trusts. On a company network a security gateway
+    // (Zscaler, Netskope, …) re-signs HTTPS with the company's own CA, which only the system
+    // knows about; without it every call fails with "invalid peer certificate: UnknownIssuer".
+    let (added, _) = roots.add_parsable_certificates(system_roots().iter().cloned());
+    tracing::debug!(
+        added,
+        "trusting the system certificate store for upstream servers"
+    );
     for r in &cfg.extra_upstream_roots {
         roots.add(r.clone()).context("adding extra upstream root")?;
     }
@@ -1774,5 +1796,15 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for Prefixed<S> {
     }
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod system_roots_tests {
+    #[test]
+    fn the_macos_certificate_store_is_read_for_upstream_trust() {
+        // Company TLS gateways re-sign HTTPS with a CA that only the system knows; those must
+        // be trusted too, so the store has to load (a stock Mac has well over a hundred roots).
+        assert!(super::system_roots().len() > 50);
     }
 }
